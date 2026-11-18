@@ -6,7 +6,7 @@
 [![Prisma](https://img.shields.io/badge/Prisma-ORM-blue)](https://prisma.io/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-blue)](https://docker.com/)
 
-An enterprise-grade, AI-powered CSV importer built for the GrowEasy CRM ecosystem. By leveraging the advanced semantic capabilities of Google's Gemini AI, this system intelligently maps wildly inconsistent, schema-less CSV dumps (e.g., Facebook Leads, Google Ads, real-estate CRM exports, and messy manual spreadsheets) directly into a strictly validated CRM schema. 
+An enterprise-grade, AI-powered CSV importer built for the CRM ecosystem. By leveraging the advanced semantic capabilities of Google's Gemini AI, this system intelligently maps wildly inconsistent, schema-less CSV dumps (e.g., Facebook Leads, Google Ads, real-estate CRM exports, and messy manual spreadsheets) directly into a strictly validated CRM schema. 
 
 Say goodbye to rigid templates, frustrating column mappings, and manual data cleanup.
 
