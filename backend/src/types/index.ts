@@ -56,6 +56,24 @@ export interface FailedRow {
   reason: string;
 }
 
+export type PendingImportStatus = 'PENDING' | 'COMMITTED' | 'REJECTED' | 'EXPIRED';
+
+export interface PendingImportDTO {
+  id: string;
+  filename: string;
+  totalRows: number;
+  status: PendingImportStatus;
+  totalValid: number;
+  totalSkipped: number;
+  totalFailed: number;
+  createdAt: string;
+  expiresAt: string;
+  committedImportId?: string | null;
+  records: CRMRecord[];
+  skipped: SkippedRow[];
+  failed: FailedRow[];
+}
+
 export interface BatchResult {
   records: CRMRecord[];
   skipped: SkippedRow[];
@@ -84,9 +102,11 @@ export interface SSEProgressEvent {
 
 export interface SSECompleteEvent {
   type: 'complete';
-  totalImported: number;
+  pendingImportId?: string;
+  totalValid: number;
   totalSkipped: number;
   totalFailed: number;
+  totalImported?: number;
   importId?: string;
 }
 

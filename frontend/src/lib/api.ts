@@ -1,4 +1,4 @@
-import type { CRMRecord, SkippedRow } from '@/types';
+import type { CRMRecord, SkippedRow, ApproveResponse, RejectResponse, PendingImportDTO } from '@/types';
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
 
@@ -14,12 +14,16 @@ export interface ExtractProgressEvent {
 
 export interface ExtractCompleteEvent {
   type: 'complete';
-  totalImported: number;
+  pendingImportId?: string;
+  totalValid?: number;
+  totalImported?: number;
   totalSkipped: number;
   /** Rows that failed AI extraction or validation after all retries. */
   totalFailed?: number;
   importId?: string;
 }
+
+export type { ApproveResponse, RejectResponse, PendingImportDTO };
 
 export interface ExtractErrorEvent {
   type: 'error';
@@ -134,4 +138,69 @@ export async function checkHealth(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Submits explicit human approval to persist the pending import.
+ */
+export async function approvePendingImport(pendingImportId: string): Promise<ApproveResponse> {
+  const response = await fetch(`${BACKEND_URL}/api/imports/${pendingImportId}/approve`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    let errorMessage = `Approval failed: ${response.status}`;
+    try {
+      const errBody = await response.json();
+      errorMessage = errBody.error || errorMessage;
+    } catch {}
+    throw new Error(errorMessage);
+  }
+
+  return response.json();
+}
+
+/**
+ * Submits explicit human rejection to discard the pending import without persisting leads.
+ */
+export async function rejectPendingImport(pendingImportId: string): Promise<RejectResponse> {
+  const response = await fetch(`${BACKEND_URL}/api/imports/${pendingImportId}/reject`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    let errorMessage = `Rejection failed: ${response.status}`;
+    try {
+      const errBody = await response.json();
+      errorMessage = errBody.error || errorMessage;
+    } catch {}
+    throw new Error(errorMessage);
+  }
+
+  return response.json();
+}
+
+/**
+ * Loads pending import details from the server.
+ */
+export async function getPendingImport(pendingImportId: string): Promise<PendingImportDTO> {
+  const response = await fetch(`${BACKEND_URL}/api/imports/pending/${pendingImportId}`);
+
+  if (!response.ok) {
+    let errorMessage = `Failed to fetch pending import: ${response.status}`;
+    try {
+      const errBody = await response.json();
+      errorMessage = errBody.error || errorMessage;
+    } catch {}
+    throw new Error(errorMessage);
+  }
+
+  const data = await response.json();
+  return data.pendingImport;
 }

@@ -42,7 +42,17 @@
   "jest": {
     "preset": "ts-jest",
     "testEnvironment": "jsdom",
-    "setupFilesAfterFramework": [
+    "transform": {
+      "^.+\\.(ts|tsx)$": [
+        "ts-jest",
+        {
+          "tsconfig": {
+            "jsx": "react-jsx"
+          }
+        }
+      ]
+    },
+    "setupFilesAfterEnv": [
       "@testing-library/jest-dom"
     ],
     "roots": [

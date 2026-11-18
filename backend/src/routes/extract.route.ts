@@ -96,79 +96,42 @@ router.post('/', upload.single('file'), async (req: Request, res: Response): Pro
       sendEvent(event);
     });
 
-    // 3. Persist to database — count only actually persisted rows
-    let importId: string | undefined;
-    let actuallyImported = 0;
+    // 3. Stage in temporary server storage (PendingImport) — do NOT write to final CRM tables
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24-hour retention window
+    let pendingImportId: string | undefined;
 
-    if (records.length > 0 || skipped.length > 0 || failed.length > 0) {
-      try {
-        const dbImport = await prisma.import.create({
-          data: {
-            filename,
-            totalRows: rows.length,
-            totalImported: records.length, // Will be corrected below if DB partially fails
-            totalSkipped: skipped.length,
-            leads: {
-              create: records.map((r) => ({
-                // Validate the date once more before Prisma: only pass a Date if it parses cleanly
-                createdAt: (() => {
-                  if (!r.created_at) return null;
-                  const d = new Date(r.created_at);
-                  return isNaN(d.getTime()) ? null : d;
-                })(),
-                name: r.name,
-                email: r.email,
-                countryCode: r.country_code,
-                mobileWithoutCountryCode: r.mobile_without_country_code,
-                company: r.company,
-                city: r.city,
-                state: r.state,
-                country: r.country,
-                leadOwner: r.lead_owner,
-                crmStatus: r.crm_status,
-                crmNote: r.crm_note,
-                dataSource: r.data_source,
-                possessionTime: r.possession_time,
-                description: r.description,
-              })),
-            },
-            skippedRows: {
-              create: [
-                ...skipped.map((s) => ({
-                  rawRow: s.row,
-                  reason: s.reason,
-                })),
-                // Store failed rows in skippedRows table with a prefixed reason
-                // so they are visible in the DB without changing the schema
-                ...failed.map((f) => ({
-                  rawRow: f.row,
-                  reason: `[AI_FAILURE] ${f.reason}`,
-                })),
-              ],
-            },
-          },
-          include: { _count: { select: { leads: true } } },
-        });
-
-        importId = dbImport.id;
-        // Use actual DB lead count, not the in-memory count, in case of partial persistence
-        actuallyImported = dbImport._count.leads;
-      } catch (dbErr) {
-        // DB persistence failed — log the error class only, not full stack or data
-        const dbErrMessage = dbErr instanceof Error ? dbErr.message.split('\n')[0] : 'Database error';
-        console.error(`Database persistence failed: ${dbErrMessage}`);
-        // actuallyImported stays 0; importId stays undefined
-        // Report this as 0 imported rather than falsely claiming success
-      }
+    try {
+      const pendingImport = await prisma.pendingImport.create({
+        data: {
+          filename,
+          totalRows: rows.length,
+          status: 'PENDING',
+          records: records as any,
+          skipped: skipped as any,
+          failed: failed as any,
+          expiresAt,
+        },
+      });
+      pendingImportId = pendingImport.id;
+    } catch (dbErr) {
+      const dbErrMessage = dbErr instanceof Error ? dbErr.message.split('\n')[0] : 'Database error';
+      console.error(`Failed to stage pending import: ${dbErrMessage}`);
+      sendTerminalEvent({
+        type: 'error',
+        message: 'Failed to stage extracted leads for review. Please try again.',
+      });
+      res.end();
+      return;
     }
 
-    // 4. Send completion event with accurate counts
+    // 4. Send completion event with pending import ID for human review
     sendTerminalEvent({
       type: 'complete',
-      totalImported: actuallyImported,
+      pendingImportId,
+      totalValid: records.length,
       totalSkipped: skipped.length,
       totalFailed: failed.length,
-      importId,
+      totalImported: 0,
     });
   } catch (err: unknown) {
     // Top-level error — send a safe message without stack traces or data

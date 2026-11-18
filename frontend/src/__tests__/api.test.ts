@@ -7,6 +7,7 @@
  */
 
 import type { ExtractEvent, ExtractCompleteEvent, ExtractErrorEvent } from '../lib/api';
+import { approvePendingImport, rejectPendingImport, getPendingImport } from '../lib/api';
 
 // ---------------------------------------------------------------------------
 // SSE frame parser — extracted from the same logic used in extractLeads
@@ -219,5 +220,109 @@ describe('extractLeads stream termination contracts', () => {
     const { receivedComplete, errorFromStream } = parseSSEPayload(payload);
     expect(receivedComplete).toBe(true);
     expect(errorFromStream).toBeNull();
+  });
+
+  it('parses complete event carrying pendingImportId and totalValid for human review', () => {
+    const payload = makeSSEPayload([
+      {
+        type: 'complete',
+        pendingImportId: 'pending-999',
+        totalValid: 15,
+        totalSkipped: 2,
+        totalFailed: 1,
+        totalImported: 0,
+      },
+    ]);
+
+    const { receivedEvents, receivedComplete } = parseSSEPayload(payload);
+    expect(receivedComplete).toBe(true);
+    const completeEvent = receivedEvents.find((e) => e.type === 'complete') as ExtractCompleteEvent;
+    expect(completeEvent.pendingImportId).toBe('pending-999');
+    expect(completeEvent.totalValid).toBe(15);
+    expect(completeEvent.totalImported).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Human approval, rejection, and pending import API client functions
+// ---------------------------------------------------------------------------
+describe('Human-in-the-loop approval API functions', () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('approvePendingImport sends POST and returns approval result', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        importId: 'crm_imp_123',
+        totalImported: 10,
+      }),
+    });
+
+    const result = await approvePendingImport('pending_abc');
+    expect(result.success).toBe(true);
+    expect(result.importId).toBe('crm_imp_123');
+    expect(result.totalImported).toBe(10);
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/imports/pending_abc/approve'),
+      expect.objectContaining({ method: 'POST' })
+    );
+  });
+
+  it('approvePendingImport throws meaningful error when backend rejects approval', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: 'This pending import has expired' }),
+    });
+
+    await expect(approvePendingImport('pending_expired')).rejects.toThrow('This pending import has expired');
+  });
+
+  it('rejectPendingImport sends POST and returns rejection confirmation', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        message: 'Import rejected. No records were added to your CRM.',
+        status: 'REJECTED',
+      }),
+    });
+
+    const result = await rejectPendingImport('pending_xyz');
+    expect(result.success).toBe(true);
+    expect(result.status).toBe('REJECTED');
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/imports/pending_xyz/reject'),
+      expect.objectContaining({ method: 'POST' })
+    );
+  });
+
+  it('getPendingImport sends GET and returns pending import metadata', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        pendingImport: {
+          id: 'pending_1',
+          filename: 'leads.csv',
+          totalRows: 5,
+          status: 'PENDING',
+          records: [],
+          skipped: [],
+          failed: [],
+        },
+      }),
+    });
+
+    const result = await getPendingImport('pending_1');
+    expect(result.id).toBe('pending_1');
+    expect(result.status).toBe('PENDING');
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/imports/pending/pending_1')
+    );
   });
 });

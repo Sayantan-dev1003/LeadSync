@@ -44,6 +44,44 @@ export interface SkippedRow {
   reason: string;
 }
 
+export interface FailedRow {
+  row: RawRow;
+  reason: string;
+}
+
+export type PendingImportStatus = 'PENDING' | 'COMMITTED' | 'REJECTED' | 'EXPIRED';
+
+export interface PendingImportDTO {
+  id: string;
+  filename: string;
+  totalRows: number;
+  status: PendingImportStatus;
+  totalValid: number;
+  totalSkipped: number;
+  totalFailed: number;
+  createdAt: string;
+  expiresAt: string;
+  committedImportId?: string | null;
+  records: CRMRecord[];
+  skipped: SkippedRow[];
+  failed: FailedRow[];
+}
+
+export interface ApproveResponse {
+  success: boolean;
+  importId: string;
+  totalImported: number;
+  totalSkipped?: number;
+  totalFailed?: number;
+  message?: string;
+}
+
+export interface RejectResponse {
+  success: boolean;
+  message: string;
+  status: 'REJECTED';
+}
+
 export interface ParsedCSV {
   rows: RawRow[];
   headers: string[];
@@ -58,19 +96,22 @@ export interface ImportProgress {
   totalBatches: number;
   records: CRMRecord[];
   skipped: SkippedRow[];
+  failed?: FailedRow[];
 }
 
 export interface ImportResult {
   records: CRMRecord[];
   skipped: SkippedRow[];
+  failed?: FailedRow[];
   totalImported: number;
   totalSkipped: number;
   /** Rows that failed AI extraction or validation after all retries. */
   totalFailed?: number;
   importId?: string;
+  pendingImportId?: string;
 }
 
-export type Step = 'upload' | 'preview' | 'confirm' | 'results';
+export type Step = 'upload' | 'preview' | 'confirm' | 'review' | 'results';
 
 export const CRM_STATUS_LABELS: Record<CrmStatus, string> = {
   GOOD_LEAD_FOLLOW_UP: 'Good Lead',

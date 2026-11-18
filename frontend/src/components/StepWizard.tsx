@@ -13,11 +13,11 @@ interface StepConfig {
 const STEPS: StepConfig[] = [
   { id: 'upload', label: 'Upload', icon: <Upload className="h-4 w-4" /> },
   { id: 'preview', label: 'Preview', icon: <Eye className="h-4 w-4" /> },
-  { id: 'confirm', label: 'Confirm', icon: <Sparkles className="h-4 w-4" /> },
+  { id: 'review', label: 'Review AI', icon: <Sparkles className="h-4 w-4" /> },
   { id: 'results', label: 'Results', icon: <BarChart3 className="h-4 w-4" /> },
 ];
 
-const STEP_ORDER: Step[] = ['upload', 'preview', 'confirm', 'results'];
+const STEP_ORDER: Step[] = ['upload', 'preview', 'confirm', 'review', 'results'];
 
 interface StepWizardProps {
   currentStep: Step;

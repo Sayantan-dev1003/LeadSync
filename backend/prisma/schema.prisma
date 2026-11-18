@@ -10,15 +10,23 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum PendingImportStatus {
+  PENDING
+  COMMITTED
+  REJECTED
+  EXPIRED
+}
+
 model Import {
-  id            String       @id @default(cuid())
+  id            String         @id @default(cuid())
   filename      String
   totalRows     Int
   totalImported Int
   totalSkipped  Int
-  createdAt     DateTime     @default(now())
+  createdAt     DateTime       @default(now())
   leads         Lead[]
   skippedRows   SkippedRow[]
+  pendingImport PendingImport?
 
   @@map("imports")
 }
@@ -58,4 +66,23 @@ model SkippedRow {
 
   @@index([importId])
   @@map("skipped_rows")
+}
+
+model PendingImport {
+  id                String              @id @default(cuid())
+  filename          String
+  totalRows         Int
+  status            PendingImportStatus @default(PENDING)
+  records           Json
+  skipped           Json
+  failed            Json
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  expiresAt         DateTime
+  committedImportId String?             @unique
+  committedImport   Import?             @relation(fields: [committedImportId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([expiresAt])
+  @@map("pending_imports")
 }
