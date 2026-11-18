@@ -2,6 +2,8 @@ import 'dotenv/config';
 import 'express-async-errors';
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
+import { authenticate } from './middleware/auth.middleware';
+import { sanitizeLogMessage } from './lib/sanitizer';
 import parseRouter from './routes/parse.route';
 import extractRouter from './routes/extract.route';
 import importsRouter from './routes/imports.route';
@@ -22,6 +24,7 @@ app.use(cors({
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(authenticate);
 
 // --- Health check ---
 app.get('/health', (_req: Request, res: Response) => {
@@ -36,7 +39,8 @@ app.use('/api/leads', leadsRouter);
 
 // --- Global error handler ---
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-  console.error('Unhandled error:', err);
+  const safeMsg = sanitizeLogMessage(err.message);
+  console.error('Unhandled error:', safeMsg);
 
   if (err.message === 'Only CSV files are accepted') {
     res.status(415).json({ error: err.message });
@@ -48,7 +52,7 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
     return;
   }
 
-  // Never expose stack traces to the client
+  // Never expose stack traces or raw details to the client
   res.status(500).json({ error: 'An internal server error occurred' });
 });
 

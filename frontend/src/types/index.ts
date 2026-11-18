@@ -49,10 +49,11 @@ export interface FailedRow {
   reason: string;
 }
 
-export type PendingImportStatus = 'PENDING' | 'COMMITTED' | 'REJECTED' | 'EXPIRED';
+export type PendingImportStatus = 'PENDING' | 'APPROVED' | 'COMMITTED' | 'REJECTED' | 'EXPIRED';
 
 export interface PendingImportDTO {
   id: string;
+  userId?: string | null;
   filename: string;
   totalRows: number;
   status: PendingImportStatus;

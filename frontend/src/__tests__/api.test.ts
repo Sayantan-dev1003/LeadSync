@@ -322,7 +322,12 @@ describe('Human-in-the-loop approval API functions', () => {
     expect(result.id).toBe('pending_1');
     expect(result.status).toBe('PENDING');
     expect(global.fetch).toHaveBeenCalledWith(
-      expect.stringContaining('/api/imports/pending/pending_1')
+      expect.stringContaining('/api/imports/pending/pending_1'),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: expect.any(String),
+        }),
+      })
     );
   });
 });

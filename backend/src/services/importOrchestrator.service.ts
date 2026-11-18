@@ -2,6 +2,7 @@ import pLimit from 'p-limit';
 import { chunkArray } from './csvParser.service';
 import { extractBatch, withRetry } from './aiExtractor.service';
 import type { CRMRecord, FailedRow, RawRow, SkippedRow, SSEEvent } from '../types';
+import { sanitizeLogMessage } from '../lib/sanitizer';
 
 export interface OrchestratorOptions {
   batchSize?: number;
@@ -57,10 +58,11 @@ export async function orchestrateImport(
           batchFailed = result.failed;
         } catch (err) {
           // All retries exhausted — classify all rows in the batch as failed.
-          // Log only the error message, not the full stack or any row data.
-          const errMessage = err instanceof Error ? err.message : 'Unknown error';
+          // Log only diagnostic context with sanitized error message, never row contents or PII.
+          const rawMessage = err instanceof Error ? err.message : 'Unknown error';
+          const safeMessage = sanitizeLogMessage(rawMessage);
           console.error(
-            `Batch ${batchIndex + 1} permanently failed after ${maxRetries} retries: ${errMessage}`
+            `Batch ${batchIndex + 1} (${batch.length} rows) permanently failed after ${maxRetries} retries: ${safeMessage}`
           );
           batchFailed = batch.map((row) => ({
             row,

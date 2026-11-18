@@ -12,6 +12,7 @@ datasource db {
 
 enum PendingImportStatus {
   PENDING
+  APPROVED
   COMMITTED
   REJECTED
   EXPIRED
@@ -19,6 +20,7 @@ enum PendingImportStatus {
 
 model Import {
   id            String         @id @default(cuid())
+  userId        String?
   filename      String
   totalRows     Int
   totalImported Int
@@ -28,6 +30,7 @@ model Import {
   skippedRows   SkippedRow[]
   pendingImport PendingImport?
 
+  @@index([userId])
   @@map("imports")
 }
 
@@ -70,6 +73,7 @@ model SkippedRow {
 
 model PendingImport {
   id                String              @id @default(cuid())
+  userId            String?
   filename          String
   totalRows         Int
   status            PendingImportStatus @default(PENDING)
@@ -84,5 +88,6 @@ model PendingImport {
 
   @@index([status])
   @@index([expiresAt])
+  @@index([userId])
   @@map("pending_imports")
 }

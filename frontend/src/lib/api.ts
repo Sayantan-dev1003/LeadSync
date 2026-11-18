@@ -1,6 +1,21 @@
-import type { CRMRecord, SkippedRow, ApproveResponse, RejectResponse, PendingImportDTO } from '@/types';
+import type { CRMRecord, SkippedRow, FailedRow, ApproveResponse, RejectResponse, PendingImportDTO } from '@/types';
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
+
+export function getAuthToken(): string {
+  if (typeof window !== 'undefined') {
+    const stored = localStorage.getItem('leadsync_auth_token');
+    if (stored) return stored;
+  }
+  return process.env.NEXT_PUBLIC_API_TOKEN || 'demo-reviewer-token';
+}
+
+export function getAuthHeaders(): Record<string, string> {
+  const token = getAuthToken();
+  return {
+    Authorization: `Bearer ${token}`,
+  };
+}
 
 export interface ExtractProgressEvent {
   type: 'progress';
@@ -8,8 +23,7 @@ export interface ExtractProgressEvent {
   totalBatches: number;
   batchRecords: CRMRecord[];
   batchSkipped: SkippedRow[];
-  /** Rows that failed AI extraction or validation — distinct from skipped rows. */
-  batchFailed?: Array<{ row: Record<string, string>; reason: string }>;
+  batchFailed?: FailedRow[];
 }
 
 export interface ExtractCompleteEvent {
@@ -18,7 +32,6 @@ export interface ExtractCompleteEvent {
   totalValid?: number;
   totalImported?: number;
   totalSkipped: number;
-  /** Rows that failed AI extraction or validation after all retries. */
   totalFailed?: number;
   importId?: string;
 }
@@ -36,14 +49,10 @@ export type ExtractEvent = ExtractProgressEvent | ExtractCompleteEvent | Extract
  * Streams AI extraction results from the backend via fetch + ReadableStream.
  * Calls onEvent for each SSE event as it arrives.
  *
- * Resolves when the stream ends with a 'complete' event.
- * Rejects when:
- *   - The HTTP response is not OK.
- *   - The backend sends an 'error' event.
- *   - The stream ends without a 'complete' event (interrupted stream).
- *
- * This ensures callers cannot accidentally treat a failed or interrupted import
- * as a successful one.
+ * Strict validation:
+ * - Rejects if complete event lacks a valid pendingImportId.
+ * - Rejects if stream ends without complete event.
+ * - Attaches authorization headers.
  */
 export async function extractLeads(
   file: File,
@@ -55,6 +64,9 @@ export async function extractLeads(
 
   const response = await fetch(`${BACKEND_URL}/api/extract`, {
     method: 'POST',
+    headers: {
+      ...getAuthHeaders(),
+    },
     body: formData,
     signal,
   });
@@ -95,15 +107,24 @@ export async function extractLeads(
           const jsonStr = dataLine.slice(6);
           try {
             const event = JSON.parse(jsonStr) as ExtractEvent;
-            onEvent(event);
 
             if (event.type === 'complete') {
+              if (
+                !event.pendingImportId ||
+                typeof event.pendingImportId !== 'string' ||
+                event.pendingImportId.trim() === ''
+              ) {
+                errorFromStream = 'Malformed completion event: missing pendingImportId';
+                break;
+              }
               receivedCompleteEvent = true;
             } else if (event.type === 'error') {
-              // Store the error; we'll throw after the loop so the reader is released
               errorFromStream = event.message;
+              break;
             }
-          } catch (parseErr) {
+
+            onEvent(event);
+          } catch {
             console.warn('Failed to parse SSE event — skipping malformed frame');
           }
         }
@@ -118,7 +139,6 @@ export async function extractLeads(
     reader.releaseLock();
   }
 
-  // Throw after the reader is released so the connection is cleaned up properly
   if (errorFromStream !== null) {
     throw new Error(errorFromStream);
   }
@@ -144,10 +164,15 @@ export async function checkHealth(): Promise<boolean> {
  * Submits explicit human approval to persist the pending import.
  */
 export async function approvePendingImport(pendingImportId: string): Promise<ApproveResponse> {
+  if (!pendingImportId || typeof pendingImportId !== 'string' || !pendingImportId.trim()) {
+    throw new Error('Invalid pending import ID');
+  }
+
   const response = await fetch(`${BACKEND_URL}/api/imports/${pendingImportId}/approve`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      ...getAuthHeaders(),
     },
   });
 
@@ -167,10 +192,15 @@ export async function approvePendingImport(pendingImportId: string): Promise<App
  * Submits explicit human rejection to discard the pending import without persisting leads.
  */
 export async function rejectPendingImport(pendingImportId: string): Promise<RejectResponse> {
+  if (!pendingImportId || typeof pendingImportId !== 'string' || !pendingImportId.trim()) {
+    throw new Error('Invalid pending import ID');
+  }
+
   const response = await fetch(`${BACKEND_URL}/api/imports/${pendingImportId}/reject`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      ...getAuthHeaders(),
     },
   });
 
@@ -190,7 +220,15 @@ export async function rejectPendingImport(pendingImportId: string): Promise<Reje
  * Loads pending import details from the server.
  */
 export async function getPendingImport(pendingImportId: string): Promise<PendingImportDTO> {
-  const response = await fetch(`${BACKEND_URL}/api/imports/pending/${pendingImportId}`);
+  if (!pendingImportId || typeof pendingImportId !== 'string' || !pendingImportId.trim()) {
+    throw new Error('Invalid pending import ID');
+  }
+
+  const response = await fetch(`${BACKEND_URL}/api/imports/pending/${pendingImportId}`, {
+    headers: {
+      ...getAuthHeaders(),
+    },
+  });
 
   if (!response.ok) {
     let errorMessage = `Failed to fetch pending import: ${response.status}`;

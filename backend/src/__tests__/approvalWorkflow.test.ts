@@ -59,6 +59,7 @@ import prisma from '../lib/prisma';
 import { orchestrateImport } from '../services/importOrchestrator.service';
 import extractRouter from '../routes/extract.route';
 import importsRouter from '../routes/imports.route';
+import { authenticate, generateToken } from '../middleware/auth.middleware';
 import type { CRMRecord, SkippedRow } from '../types';
 
 const mockPrisma = prisma as unknown as {
@@ -93,12 +94,15 @@ function invokeRouter(
     url: string;
     body?: any;
     file?: any;
+    headers?: Record<string, string>;
+    user?: any;
   }
 ): Promise<{ statusCode: number; body: any; rawWrites: string[] }> {
   return new Promise((resolve, reject) => {
     const rawWrites: string[] = [];
     let resolved = false;
 
+    const defaultToken = generateToken({ id: 'test_user_1', role: 'admin' });
     const req: any = {
       method: reqOptions.method,
       url: reqOptions.url,
@@ -108,7 +112,12 @@ function invokeRouter(
       query: {},
       body: reqOptions.body || {},
       file: reqOptions.file,
-      headers: {},
+      headers:
+        reqOptions.headers !== undefined
+          ? reqOptions.headers
+          : { authorization: `Bearer ${defaultToken}` },
+      user: reqOptions.user,
+      on: jest.fn(),
     };
 
     const finish = (statusCode: number, body: any) => {
@@ -148,9 +157,11 @@ function invokeRouter(
       },
     };
 
-    router(req, res, (err: any) => {
-      if (err) reject(err);
-      else finish(res.statusCode, null);
+    authenticate(req, res, () => {
+      router(req, res, (err: any) => {
+        if (err) reject(err);
+        else finish(res.statusCode, null);
+      });
     });
   });
 }
@@ -159,7 +170,7 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-const sampleValidRecord: CRMRecord = {
+const sampleValidRecord: any = {
   created_at: '2024-05-13T00:00:00.000Z',
   name: 'Rahul Sharma',
   email: 'rahul@example.com',
@@ -175,6 +186,8 @@ const sampleValidRecord: CRMRecord = {
   data_source: 'eden_park',
   possession_time: 'Ready to move',
   description: null,
+  skip: false,
+  skipReason: null,
 };
 
 const sampleSkippedRow: SkippedRow = {
@@ -530,11 +543,7 @@ describe('Phase C: Human rejection', () => {
     };
 
     mockPrisma.pendingImport.findUnique.mockResolvedValue(pendingData);
-    mockPrisma.pendingImport.update.mockResolvedValue({
-      ...pendingData,
-      status: 'REJECTED',
-      records: [],
-    });
+    mockPrisma.pendingImport.updateMany.mockResolvedValue({ count: 1 });
 
     const { statusCode, body } = await invokeRouter(importsRouter, {
       method: 'POST',
@@ -549,12 +558,14 @@ describe('Phase C: Human rejection', () => {
     expect(mockPrisma.import.create).not.toHaveBeenCalled();
     expect(mockPrisma.lead.create).not.toHaveBeenCalled();
 
-    // Verify staged records were wiped to purge PII
-    expect(mockPrisma.pendingImport.update).toHaveBeenCalledWith({
-      where: { id: 'pending_to_reject' },
+    // Verify staged records, skipped, and failed were all wiped atomically to purge PII
+    expect(mockPrisma.pendingImport.updateMany).toHaveBeenCalledWith({
+      where: { id: 'pending_to_reject', status: 'PENDING' },
       data: {
         status: 'REJECTED',
         records: [],
+        skipped: [],
+        failed: [],
       },
     });
   });
@@ -606,6 +617,78 @@ describe('Phase C: Human rejection', () => {
     });
 
     expect(statusCode).toBe(400);
-    expect(body.error).toMatch(/Cannot reject an import that has already been committed/i);
+    expect(body.error).toMatch(/Cannot reject an import that has already been (approved|committed)/i);
+  });
+});
+
+// ============================================================================
+// Phase D: Security & Access Control
+// ============================================================================
+describe('Phase D: Security & Access Control', () => {
+  it('rejects unauthenticated requests to protected import endpoints with 401', async () => {
+    // Calling without Authorization header
+    const { statusCode, body } = await invokeRouter(importsRouter, {
+      method: 'POST',
+      url: '/pending_123/approve',
+      headers: {}, // No auth header
+    });
+
+    expect(statusCode).toBe(401);
+    expect(body.error).toMatch(/Authentication required/i);
+  });
+
+  it('rejects access to another user pending import with 403 Forbidden', async () => {
+    const foreignPending = {
+      id: 'pending_foreign',
+      userId: 'user_owner_abc', // owned by user_owner_abc
+      filename: 'sample.csv',
+      totalRows: 1,
+      status: 'PENDING',
+      records: [sampleValidRecord],
+      skipped: [],
+      failed: [],
+      expiresAt: new Date(Date.now() + 86400000),
+      committedImportId: null,
+    };
+
+    mockPrisma.pendingImport.findUnique.mockResolvedValue(foreignPending);
+
+    // Request made by user_attacker_xyz
+    const userToken = generateToken({ id: 'user_attacker_xyz', role: 'user' });
+    const { statusCode, body } = await invokeRouter(importsRouter, {
+      method: 'POST',
+      url: '/pending_foreign/approve',
+      headers: { authorization: `Bearer ${userToken}` },
+    });
+
+    expect(statusCode).toBe(403);
+    expect(body.error).toMatch(/not authorized to approve/i);
+  });
+
+  it('allows authorized reviewer or admin to access pending imports', async () => {
+    const pendingData = {
+      id: 'pending_admin_ok',
+      userId: 'user_owner_abc',
+      filename: 'sample.csv',
+      totalRows: 1,
+      status: 'PENDING',
+      records: [sampleValidRecord],
+      skipped: [],
+      failed: [],
+      expiresAt: new Date(Date.now() + 86400000),
+      committedImportId: null,
+    };
+
+    mockPrisma.pendingImport.findUnique.mockResolvedValue(pendingData);
+
+    const adminToken = generateToken({ id: 'admin_1', role: 'admin' });
+    const { statusCode, body } = await invokeRouter(importsRouter, {
+      method: 'GET',
+      url: '/pending/pending_admin_ok',
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+
+    expect(statusCode).toBe(200);
+    expect(body.pendingImport.id).toBe('pending_admin_ok');
   });
 });

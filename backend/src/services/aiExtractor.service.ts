@@ -8,6 +8,7 @@ import {
 } from '../types';
 import { validateAIBatch } from './zodSchemas.service';
 import { shouldSkipRow } from './validators.service';
+import { sanitizeLogMessage } from '../lib/sanitizer';
 
 const SYSTEM_PROMPT = `You are a data-mapping engine for a CRM system called GrowEasy. Your ONLY job is to receive raw CSV row objects with arbitrary, inconsistent, or messy column names and map each row's data onto a fixed CRM schema.
 
@@ -151,12 +152,12 @@ function parseAIResponseText(rawText: string): unknown {
     // Attempt to extract JSON array from response
     const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
     if (!arrayMatch) {
-      throw new Error(`AI response is not valid JSON — eligible for retry: ${cleaned.slice(0, 100)}`);
+      throw new Error('AI response is not valid JSON — eligible for retry');
     }
     try {
       parsed = JSON.parse(arrayMatch[0]);
     } catch {
-      throw new Error(`AI response contains malformed JSON — eligible for retry: ${cleaned.slice(0, 100)}`);
+      throw new Error('AI response contains malformed JSON — eligible for retry');
     }
   }
 
@@ -252,9 +253,10 @@ export async function withRetry<T>(
       if (attempt === maxAttempts) break;
 
       const delay = baseDelayMs * Math.pow(2, attempt - 1);
-      // Log the error class/message but not full stack traces or data contents
-      const errMessage = err instanceof Error ? err.message : 'Unknown error';
-      console.warn(`Batch attempt ${attempt} failed (${errMessage}). Retrying in ${delay}ms...`);
+      // Log the sanitized error message without full stack traces or customer data
+      const rawMessage = err instanceof Error ? err.message : 'Unknown error';
+      const safeMessage = sanitizeLogMessage(rawMessage);
+      console.warn(`Batch attempt ${attempt} failed (${safeMessage}). Retrying in ${delay}ms...`);
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }

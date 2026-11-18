@@ -6,7 +6,7 @@ import { UploadStep } from '@/components/steps/UploadStep';
 import { PreviewStep } from '@/components/steps/PreviewStep';
 import { ReviewStep } from '@/components/steps/ReviewStep';
 import type { ParsedCSV, Step, CRMRecord, SkippedRow, FailedRow } from '@/types';
-import { X, Loader2, Sparkles, Check, Ban } from 'lucide-react';
+import { X, Loader2, Sparkles, Check, Ban, AlertCircle } from 'lucide-react';
 import { extractLeads, approvePendingImport, rejectPendingImport } from '@/lib/api';
 import { clsx } from 'clsx';
 
@@ -79,18 +79,27 @@ export function CSVImporter() {
             failedAccumulator.push(...event.batchFailed);
           }
         } else if (event.type === 'complete') {
-          // Extraction finished! Do NOT navigate to Manage Leads.
-          // Save pending ID and staged records, then transition to human review step.
-          setProgressPct(100);
-
-          if (event.pendingImportId) {
-            setPendingImportId(event.pendingImportId);
+          // Strictly validate that completion payload contains a valid pendingImportId
+          if (
+            !event.pendingImportId ||
+            typeof event.pendingImportId !== 'string' ||
+            !event.pendingImportId.trim()
+          ) {
+            setIsExtracting(false);
+            setProgressPct(0);
+            setApprovalError(
+              'Extraction completed, but server failed to provide a valid pending import ID. Leads cannot be reviewed. Please retry.'
+            );
+            return;
           }
+
+          // Extraction finished and verified! Transition to human review step.
+          setProgressPct(100);
+          setPendingImportId(event.pendingImportId);
           setExtractedRecords([...recordsAccumulator]);
           setExtractedSkipped([...skippedAccumulator]);
           setExtractedFailed([...failedAccumulator]);
 
-          // Move to review step
           setIsExtracting(false);
           setStep('review');
         }
@@ -98,7 +107,7 @@ export function CSVImporter() {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to extract data. Please try again.';
       console.error('Extraction failed:', error);
-      alert(`AI Extraction failed: ${message}`);
+      setApprovalError(`Extraction failed: ${message}`);
       setIsExtracting(false);
       setProgressPct(0);
     }
@@ -205,6 +214,16 @@ export function CSVImporter() {
 
             {/* Modal Body */}
             <div className="p-4 md:p-6 overflow-y-auto">
+              {approvalError && step !== 'review' && (
+                <div className="mb-4 p-3.5 rounded-xl border border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300 flex items-start gap-2.5 text-sm animate-fade-in">
+                  <AlertCircle className="w-5 h-5 shrink-0 text-red-500 mt-0.5" />
+                  <div className="flex-1">
+                    <p className="font-semibold">Pipeline Error</p>
+                    <p className="text-xs opacity-90 mt-0.5">{approvalError}</p>
+                  </div>
+                </div>
+              )}
+
               {step === 'upload' && <UploadStep onParsed={handleParsed} />}
 
               {step === 'preview' && parsedCSV && (

@@ -3,6 +3,8 @@ import multer from 'multer';
 import { parseCSVBuffer } from '../services/csvParser.service';
 import { orchestrateImport } from '../services/importOrchestrator.service';
 import prisma from '../lib/prisma';
+import { requireAuth } from '../middleware/auth.middleware';
+import { sanitizeLogMessage } from '../lib/sanitizer';
 import type { SSEEvent, CRMRecord, SkippedRow, FailedRow } from '../types';
 
 const router = Router();
@@ -26,14 +28,13 @@ const upload = multer({
  *
  * Event types:
  *   progress  — batch processed; contains batchRecords, batchSkipped, batchFailed
- *   complete  — all batches done and DB write attempted; contains final counts and importId
+ *   complete  — all batches done and staged in PendingImport; contains pendingImportId
  *   error     — unrecoverable pipeline error; stream ends after this
  *
  * The stream always ends with either 'complete' or 'error', never silently.
- * DB persistence failures cause totalImported=0 in the complete event rather
- * than falsely claiming success.
+ * DB persistence has NOT occurred yet: totalImported=0 in the complete event.
  */
-router.post('/', upload.single('file'), async (req: Request, res: Response): Promise<void> => {
+router.post('/', requireAuth, upload.single('file'), async (req: Request, res: Response): Promise<void> => {
   if (!req.file) {
     res.status(400).json({ error: 'No file uploaded' });
     return;
@@ -46,11 +47,17 @@ router.post('/', upload.single('file'), async (req: Request, res: Response): Pro
   res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
   res.flushHeaders();
 
+  let clientClosed = false;
+  req.on('close', () => {
+    clientClosed = true;
+  });
+
   let terminalEventSent = false;
 
   const sendEvent = (event: SSEEvent): void => {
+    if (clientClosed) return;
     res.write(`data: ${JSON.stringify(event)}\n\n`);
-    // Flush if available (important for streaming)
+    // Flush if available
     if (typeof (res as unknown as { flush?: () => void }).flush === 'function') {
       (res as unknown as { flush: () => void }).flush();
     }
@@ -61,7 +68,7 @@ router.post('/', upload.single('file'), async (req: Request, res: Response): Pro
    * and 'error' if an error is thrown after the complete event was sent.
    */
   const sendTerminalEvent = (event: SSEEvent): void => {
-    if (terminalEventSent) return;
+    if (terminalEventSent || clientClosed) return;
     terminalEventSent = true;
     sendEvent(event);
   };
@@ -87,7 +94,7 @@ router.post('/', upload.single('file'), async (req: Request, res: Response): Pro
 
     // 2. Run AI extraction with streaming progress
     const { records, skipped, failed } = await orchestrateImport(rows, (event) => {
-      // Collect results as they stream
+      if (clientClosed) return;
       if (event.type === 'progress') {
         allRecords.push(...event.batchRecords);
         allSkipped.push(...event.batchSkipped);
@@ -96,13 +103,20 @@ router.post('/', upload.single('file'), async (req: Request, res: Response): Pro
       sendEvent(event);
     });
 
+    if (clientClosed) {
+      res.end();
+      return;
+    }
+
     // 3. Stage in temporary server storage (PendingImport) — do NOT write to final CRM tables
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24-hour retention window
+    const ttlHours = parseInt(process.env.PENDING_IMPORT_TTL_HOURS || '24', 10);
+    const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
     let pendingImportId: string | undefined;
 
     try {
       const pendingImport = await prisma.pendingImport.create({
         data: {
+          userId: req.user?.id || null,
           filename,
           totalRows: rows.length,
           status: 'PENDING',
@@ -114,8 +128,8 @@ router.post('/', upload.single('file'), async (req: Request, res: Response): Pro
       });
       pendingImportId = pendingImport.id;
     } catch (dbErr) {
-      const dbErrMessage = dbErr instanceof Error ? dbErr.message.split('\n')[0] : 'Database error';
-      console.error(`Failed to stage pending import: ${dbErrMessage}`);
+      const safeDbErr = sanitizeLogMessage(dbErr instanceof Error ? dbErr.message.split('\n')[0] : 'Database error');
+      console.error(`Failed to stage pending import: ${safeDbErr}`);
       sendTerminalEvent({
         type: 'error',
         message: 'Failed to stage extracted leads for review. Please try again.',
@@ -134,12 +148,14 @@ router.post('/', upload.single('file'), async (req: Request, res: Response): Pro
       totalImported: 0,
     });
   } catch (err: unknown) {
-    // Top-level error — send a safe message without stack traces or data
-    const message = err instanceof Error ? err.message.split('\n')[0] : 'An unexpected error occurred';
-    console.error('Extract pipeline error:', err instanceof Error ? err.message : err);
-    sendTerminalEvent({ type: 'error', message });
+    const rawMessage = err instanceof Error ? err.message.split('\n')[0] : 'An unexpected error occurred';
+    const safeMessage = sanitizeLogMessage(rawMessage);
+    console.error('Extract pipeline error:', safeMessage);
+    sendTerminalEvent({ type: 'error', message: safeMessage });
   } finally {
-    res.end();
+    if (!clientClosed) {
+      res.end();
+    }
   }
 });
 

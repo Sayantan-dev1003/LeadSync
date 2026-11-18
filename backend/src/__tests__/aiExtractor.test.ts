@@ -214,16 +214,15 @@ describe('extractBatch — field-level validation', () => {
     expect(result.records).toHaveLength(1);
   });
 
-  it('defaults missing optional fields to null rather than failing the row', async () => {
-    // Row with just email — all other fields missing
+  it('reports rows with missing mandatory contract fields as failed', async () => {
+    // Row with just email — all other mandatory contract fields missing
     const minimal = [{ email: 'eve@example.com' }, { email: 'frank@example.com' }];
     mockGenerateContent.mockResolvedValueOnce(makeResponse(JSON.stringify(minimal)));
 
     const result = await runExtractBatch(sampleRawRows);
-    expect(result.failed).toHaveLength(0);
-    expect(result.records).toHaveLength(2);
-    expect(result.records[0].name).toBeNull();
-    expect(result.records[0].crm_status).toBeNull();
+    expect(result.failed).toHaveLength(2);
+    expect(result.records).toHaveLength(0);
+    expect(result.failed[0].reason).toMatch(/Validation error/i);
   });
 });
 
@@ -231,7 +230,7 @@ describe('extractBatch — field-level validation', () => {
 // Invalid status and data-source values
 // ---------------------------------------------------------------------------
 describe('extractBatch — invalid enum values', () => {
-  it('converts an invalid crm_status to null', async () => {
+  it('reports rows with unsupported crm_status as failed', async () => {
     mockGenerateContent.mockResolvedValueOnce(
       makeResponse(
         JSON.stringify([
@@ -242,10 +241,12 @@ describe('extractBatch — invalid enum values', () => {
     );
 
     const result = await runExtractBatch(sampleRawRows);
-    expect(result.records[0].crm_status).toBeNull();
+    expect(result.failed).toHaveLength(1);
+    expect(result.records).toHaveLength(1);
+    expect(result.failed[0].reason).toMatch(/crm_status/i);
   });
 
-  it('converts an invalid data_source to null', async () => {
+  it('reports rows with unsupported data_source as failed', async () => {
     mockGenerateContent.mockResolvedValueOnce(
       makeResponse(
         JSON.stringify([
@@ -256,7 +257,9 @@ describe('extractBatch — invalid enum values', () => {
     );
 
     const result = await runExtractBatch(sampleRawRows);
-    expect(result.records[0].data_source).toBeNull();
+    expect(result.failed).toHaveLength(1);
+    expect(result.records).toHaveLength(1);
+    expect(result.failed[0].reason).toMatch(/data_source/i);
   });
 });
 
@@ -278,7 +281,7 @@ describe('extractBatch — date validation', () => {
     expect(result.records[0].created_at).toBe('2024-05-13T14:20:00.000Z');
   });
 
-  it('converts an unparseable date to null (not forward garbage to Prisma)', async () => {
+  it('reports unparseable non-null dates as failed (never forwards garbage to Prisma)', async () => {
     mockGenerateContent.mockResolvedValueOnce(
       makeResponse(
         JSON.stringify([
@@ -289,15 +292,16 @@ describe('extractBatch — date validation', () => {
     );
 
     const result = await runExtractBatch(sampleRawRows);
-    // Must be null — invalid dates must never reach Prisma
-    expect(result.records[0].created_at).toBeNull();
+    expect(result.failed).toHaveLength(1);
+    expect(result.records).toHaveLength(1);
+    expect(result.failed[0].reason).toMatch(/Invalid date format/i);
   });
 
-  it('converts an empty string date to null', async () => {
+  it('normalizes empty/null date to null', async () => {
     mockGenerateContent.mockResolvedValueOnce(
       makeResponse(
         JSON.stringify([
-          { ...validExtractedArray[0], created_at: '' },
+          { ...validExtractedArray[0], created_at: null },
           validExtractedArray[1],
         ])
       )
@@ -312,7 +316,7 @@ describe('extractBatch — date validation', () => {
 // Invalid email
 // ---------------------------------------------------------------------------
 describe('extractBatch — email validation', () => {
-  it('converts a malformed email to null but keeps the row if mobile is valid', async () => {
+  it('reports malformed non-null email as failed rather than silently dropping', async () => {
     mockGenerateContent.mockResolvedValueOnce(
       makeResponse(
         JSON.stringify([
@@ -323,10 +327,9 @@ describe('extractBatch — email validation', () => {
     );
 
     const result = await runExtractBatch(sampleRawRows);
-    // Both rows have valid mobiles so they should be records, not skipped
-    expect(result.records[0].email).toBeNull();
-    expect(result.records[1].email).toBeNull();
-    expect(result.skipped).toHaveLength(0);
+    expect(result.failed).toHaveLength(2);
+    expect(result.records).toHaveLength(0);
+    expect(result.failed[0].reason).toMatch(/Invalid email format/i);
   });
 });
 
@@ -334,7 +337,7 @@ describe('extractBatch — email validation', () => {
 // Invalid phone numbers
 // ---------------------------------------------------------------------------
 describe('extractBatch — phone validation', () => {
-  it('converts a too-short mobile number to null', async () => {
+  it('reports too-short mobile number as failed rather than silently dropping', async () => {
     mockGenerateContent.mockResolvedValueOnce(
       makeResponse(
         JSON.stringify([
@@ -345,12 +348,12 @@ describe('extractBatch — phone validation', () => {
     );
 
     const result = await runExtractBatch(sampleRawRows);
-    // row[0] still has a valid email so it should be a record with null mobile
-    expect(result.records[0].mobile_without_country_code).toBeNull();
-    expect(result.records[0].email).toBe('alice@example.com');
+    expect(result.failed).toHaveLength(1);
+    expect(result.records).toHaveLength(1);
+    expect(result.failed[0].reason).toMatch(/Invalid mobile number/i);
   });
 
-  it('converts an invalid country code format to null', async () => {
+  it('reports invalid country code format as failed rather than silently dropping', async () => {
     mockGenerateContent.mockResolvedValueOnce(
       makeResponse(
         JSON.stringify([
@@ -361,9 +364,9 @@ describe('extractBatch — phone validation', () => {
     );
 
     const result = await runExtractBatch(sampleRawRows);
-    expect(result.records[0].country_code).toBeNull();
-    // Mobile should still be there
-    expect(result.records[0].mobile_without_country_code).toBe('9876543210');
+    expect(result.failed).toHaveLength(1);
+    expect(result.records).toHaveLength(1);
+    expect(result.failed[0].reason).toMatch(/Invalid country code/i);
   });
 });
 
@@ -466,5 +469,32 @@ describe('withRetry', () => {
     const result = await withRetry(fn, 3, 10);
     expect(result).toBe('ok');
     expect(fn).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Customer data & PII leakage prevention
+// ---------------------------------------------------------------------------
+describe('PII leakage prevention in error reporting', () => {
+  it('does not include customer names, emails, or phones in malformed JSON error message', async () => {
+    const rawCustomerResponse = `[
+      { "name": "John Doe", "email": "john.doe.secret@customer.com", "phone": "+1 555-019-2834"
+    `; // malformed JSON containing customer PII
+
+    mockGenerateContent.mockResolvedValueOnce(makeResponse(rawCustomerResponse));
+
+    let thrownError: Error | null = null;
+    try {
+      await runExtractBatch(sampleRawRows);
+    } catch (err) {
+      thrownError = err as Error;
+    }
+
+    expect(thrownError).not.toBeNull();
+    // Verify that raw text snippet with PII is absent from the error message
+    expect(thrownError!.message).not.toContain('John Doe');
+    expect(thrownError!.message).not.toContain('john.doe.secret@customer.com');
+    expect(thrownError!.message).not.toContain('555-019-2834');
+    expect(thrownError!.message).toMatch(/AI response (is not valid JSON|contains malformed JSON)/i);
   });
 });

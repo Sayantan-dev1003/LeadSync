@@ -4,6 +4,7 @@
  */
 import { z } from 'zod';
 import { CRM_STATUS_VALUES, DATA_SOURCE_VALUES } from '../types';
+import { normalizeDateString } from './validators.service';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -12,13 +13,12 @@ import { CRM_STATUS_VALUES, DATA_SOURCE_VALUES } from '../types';
 /**
  * Coerce a string-or-null field: trim whitespace, convert empty strings and
  * "null"/"undefined" literals to null.
+ * Requires the key to be explicitly present (can be null).
  */
-const nullableString = z
+export const nullableString = z
   .union([z.string(), z.null()])
-  .nullable()
-  .optional()
   .transform((v): string | null => {
-    if (v == null) return null;
+    if (v === null) return null;
     const trimmed = String(v).trim();
     if (trimmed === '' || trimmed.toLowerCase() === 'null' || trimmed.toLowerCase() === 'undefined') {
       return null;
@@ -33,105 +33,166 @@ const nullableString = z
 /**
  * Validates an ISO 8601 date string or null.
  * - Accepts strings that parse to a valid Date.
- * - Returns null for unparseable dates (never passes garbage to Prisma).
+ * - Normalizes to ISO 8601.
+ * - Rejects malformed non-null dates with validation error (never silently converts to null).
  */
 export const isoDateOrNull = z
   .union([z.string(), z.null()])
-  .nullable()
-  .optional()
-  .transform((v): string | null => {
-    if (v == null) return null;
+  .superRefine((v, ctx) => {
+    if (v === null) return;
     const trimmed = String(v).trim();
-    if (!trimmed || trimmed.toLowerCase() === 'null') return null;
-    const d = new Date(trimmed);
-    if (isNaN(d.getTime())) return null; // Invalid date → null, never forward garbage
-    return d.toISOString();
+    if (trimmed === '' || trimmed.toLowerCase() === 'null') return;
+    const normalized = normalizeDateString(trimmed);
+    if (!normalized) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Invalid date format: "${trimmed}". Must parse to a valid date`,
+      });
+    }
+  })
+  .transform((v): string | null => {
+    if (v === null) return null;
+    const trimmed = String(v).trim();
+    if (trimmed === '' || trimmed.toLowerCase() === 'null') return null;
+    return normalizeDateString(trimmed);
   });
 
 /**
- * Email: must look like an email (basic RFC-ish check), or null.
- * Rejects obviously malformed strings without hard-failing the row.
+ * Email: must look like a valid email, or null.
+ * - If non-null and not an email, fails validation with an error.
+ * - Does NOT silently convert malformed emails to null.
  */
 export const emailOrNull = z
   .union([z.string(), z.null()])
-  .nullable()
-  .optional()
-  .transform((v): string | null => {
-    if (v == null) return null;
+  .superRefine((v, ctx) => {
+    if (v === null) return;
     const trimmed = String(v).trim();
-    if (!trimmed || trimmed.toLowerCase() === 'null') return null;
-    // Basic email pattern: something@something.something
+    if (trimmed === '' || trimmed.toLowerCase() === 'null') return;
     const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailPattern.test(trimmed)) return null;
+    if (!emailPattern.test(trimmed)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Invalid email format: "${trimmed}"`,
+      });
+    }
+  })
+  .transform((v): string | null => {
+    if (v === null) return null;
+    const trimmed = String(v).trim();
+    if (trimmed === '' || trimmed.toLowerCase() === 'null') return null;
     return trimmed.toLowerCase();
   });
 
 /**
  * Country code: must start with + and contain 1-4 digits, or null.
  * E.g. "+91", "+1", "+44", "+971".
+ * - If non-null and invalid, fails validation with an error.
  */
 export const countryCodeOrNull = z
   .union([z.string(), z.null()])
-  .nullable()
-  .optional()
-  .transform((v): string | null => {
-    if (v == null) return null;
+  .superRefine((v, ctx) => {
+    if (v === null) return;
     const trimmed = String(v).trim();
-    if (!trimmed || trimmed.toLowerCase() === 'null') return null;
+    if (trimmed === '' || trimmed.toLowerCase() === 'null') return;
     const countryCodePattern = /^\+\d{1,4}$/;
-    if (!countryCodePattern.test(trimmed)) return null;
+    if (!countryCodePattern.test(trimmed)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Invalid country code: "${trimmed}". Must start with + followed by 1 to 4 digits`,
+      });
+    }
+  })
+  .transform((v): string | null => {
+    if (v === null) return null;
+    const trimmed = String(v).trim();
+    if (trimmed === '' || trimmed.toLowerCase() === 'null') return null;
     return trimmed;
   });
 
 /**
- * Mobile number: digits only (stripped of spaces/dashes), or null.
+ * Mobile number: digits only (can normalize out spaces/dashes), or null.
  * Must be between 5 and 15 digits (ITU-T E.164 range).
+ * - If non-null and invalid, fails validation with an error.
  */
 export const mobileOrNull = z
   .union([z.string(), z.null()])
-  .nullable()
-  .optional()
-  .transform((v): string | null => {
-    if (v == null) return null;
+  .superRefine((v, ctx) => {
+    if (v === null) return;
     const trimmed = String(v).trim();
-    if (!trimmed || trimmed.toLowerCase() === 'null') return null;
+    if (trimmed === '' || trimmed.toLowerCase() === 'null') return;
     const digits = trimmed.replace(/[\s\-().+]/g, '').replace(/\D/g, '');
-    if (digits.length < 5 || digits.length > 15) return null;
-    return digits;
+    if (digits.length < 5 || digits.length > 15) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Invalid mobile number: "${trimmed}". Must contain between 5 and 15 digits`,
+      });
+    }
+  })
+  .transform((v): string | null => {
+    if (v === null) return null;
+    const trimmed = String(v).trim();
+    if (trimmed === '' || trimmed.toLowerCase() === 'null') return null;
+    return trimmed.replace(/[\s\-().+]/g, '').replace(/\D/g, '');
   });
 
 /**
  * crm_status: one of the allowed enum values (case-insensitive normalised to
  * upper-case), or null.
+ * - If non-null and not an allowed value, fails validation.
  */
 export const crmStatusOrNull = z
   .union([z.string(), z.null()])
-  .nullable()
-  .optional()
-  .transform((v): (typeof CRM_STATUS_VALUES)[number] | null => {
-    if (v == null) return null;
-    const normalised = String(v).trim().toUpperCase();
-    if ((CRM_STATUS_VALUES as readonly string[]).includes(normalised)) {
-      return normalised as (typeof CRM_STATUS_VALUES)[number];
+  .superRefine((v, ctx) => {
+    if (v === null) return;
+    const trimmed = String(v).trim();
+    if (trimmed === '' || trimmed.toLowerCase() === 'null') return;
+    const normalised = trimmed.toUpperCase();
+    if (!(CRM_STATUS_VALUES as readonly string[]).includes(normalised)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Invalid crm_status: "${trimmed}". Must be one of ${CRM_STATUS_VALUES.join(', ')} or null`,
+      });
     }
-    return null;
+  })
+  .transform((v): (typeof CRM_STATUS_VALUES)[number] | null => {
+    if (v === null) return null;
+    const trimmed = String(v).trim();
+    if (trimmed === '' || trimmed.toLowerCase() === 'null') return null;
+    return trimmed.toUpperCase() as (typeof CRM_STATUS_VALUES)[number];
   });
 
 /**
  * data_source: one of the allowed enum values (case-insensitive normalised to
  * lower-case), or null.
+ * - If non-null and not an allowed value, fails validation.
  */
 export const dataSourceOrNull = z
   .union([z.string(), z.null()])
-  .nullable()
-  .optional()
-  .transform((v): (typeof DATA_SOURCE_VALUES)[number] | null => {
-    if (v == null) return null;
-    const normalised = String(v).trim().toLowerCase();
-    if ((DATA_SOURCE_VALUES as readonly string[]).includes(normalised)) {
-      return normalised as (typeof DATA_SOURCE_VALUES)[number];
+  .superRefine((v, ctx) => {
+    if (v === null) return;
+    const trimmed = String(v).trim();
+    if (trimmed === '' || trimmed.toLowerCase() === 'null') return;
+    const normalised = trimmed.toLowerCase();
+    if (!(DATA_SOURCE_VALUES as readonly string[]).includes(normalised)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Invalid data_source: "${trimmed}". Must be one of ${DATA_SOURCE_VALUES.join(', ')} or null`,
+      });
     }
-    return null;
+  })
+  .transform((v): (typeof DATA_SOURCE_VALUES)[number] | null => {
+    if (v === null) return null;
+    const trimmed = String(v).trim();
+    if (trimmed === '' || trimmed.toLowerCase() === 'null') return null;
+    return trimmed.toLowerCase() as (typeof DATA_SOURCE_VALUES)[number];
+  });
+
+export const skipField = z
+  .union([z.boolean(), z.string(), z.null()])
+  .transform((v): boolean => {
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'string') return v.toLowerCase() === 'true';
+    return false;
   });
 
 // ---------------------------------------------------------------------------
@@ -140,9 +201,8 @@ export const dataSourceOrNull = z
 
 /**
  * Schema for a single AI-extracted CRM row (including the skip hint fields).
- * All fields are validated and normalised. Missing required keys default to null
- * rather than throwing — the schema is intentionally lenient on presence because
- * the AI might omit keys, but strict on value types/formats.
+ * Strict: rejects unexpected fields.
+ * Explicit: all 17 CRM contract keys must be present (nullable fields can be null).
  */
 export const AIExtractedRowSchema = z
   .object({
@@ -161,40 +221,10 @@ export const AIExtractedRowSchema = z
     data_source: dataSourceOrNull,
     possession_time: nullableString,
     description: nullableString,
-    // AI-provided skip hint — treated as untrusted; server enforces its own rule
-    skip: z
-      .union([z.boolean(), z.string(), z.null()])
-      .optional()
-      .transform((v): boolean => {
-        if (typeof v === 'boolean') return v;
-        if (typeof v === 'string') return v.toLowerCase() === 'true';
-        return false;
-      }),
+    skip: skipField,
     skipReason: nullableString,
   })
-  .passthrough() // Don't fail on extra keys — just ignore them
-  .transform((row) => {
-    // Ensure all mandatory CRM keys are explicitly present, defaulting to null
-    return {
-      created_at: row.created_at ?? null,
-      name: row.name ?? null,
-      email: row.email ?? null,
-      country_code: row.country_code ?? null,
-      mobile_without_country_code: row.mobile_without_country_code ?? null,
-      company: row.company ?? null,
-      city: row.city ?? null,
-      state: row.state ?? null,
-      country: row.country ?? null,
-      lead_owner: row.lead_owner ?? null,
-      crm_status: row.crm_status ?? null,
-      crm_note: row.crm_note ?? null,
-      data_source: row.data_source ?? null,
-      possession_time: row.possession_time ?? null,
-      description: row.description ?? null,
-      skip: row.skip ?? false,
-      skipReason: row.skipReason ?? null,
-    };
-  });
+  .strict();
 
 export type ValidatedAIRow = z.output<typeof AIExtractedRowSchema>;
 
@@ -204,7 +234,6 @@ export type ValidatedAIRow = z.output<typeof AIExtractedRowSchema>;
  */
 export function validateAIRow(raw: unknown): z.SafeParseReturnType<unknown, ValidatedAIRow> {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    // Wrap in a fake error result
     return {
       success: false,
       error: new z.ZodError([

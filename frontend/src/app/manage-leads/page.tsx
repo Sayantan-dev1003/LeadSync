@@ -1,9 +1,12 @@
 'use client';
 
+export const dynamic = 'force-dynamic';
+
 import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { DarkModeToggle } from '@/components/DarkModeToggle';
 import { Search, RefreshCw, ChevronRight } from 'lucide-react';
+import { getAuthHeaders } from '@/lib/api';
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
 
@@ -49,7 +52,7 @@ function ManageLeadsContent() {
       const url = importId 
         ? `${BACKEND_URL}/api/imports/${importId}/leads${searchParam}`
         : `${BACKEND_URL}/api/leads${searchParam}`;
-      const res = await fetch(url);
+      const res = await fetch(url, { headers: getAuthHeaders() });
       if (res.ok) {
         const data = await res.json();
         setLeads(data.leads || []);
@@ -57,7 +60,7 @@ function ManageLeadsContent() {
       
       if (importId) {
         // Fetch stats
-        const statsRes = await fetch(`${BACKEND_URL}/api/imports/${importId}`);
+        const statsRes = await fetch(`${BACKEND_URL}/api/imports/${importId}`, { headers: getAuthHeaders() });
         if (statsRes.ok) {
           const statsData = await statsRes.json();
           setImportJob(statsData.importJob);
@@ -65,7 +68,7 @@ function ManageLeadsContent() {
         
         // Fetch skipped if tab is skipped
         if (activeTab === 'skipped') {
-          const skipRes = await fetch(`${BACKEND_URL}/api/imports/${importId}/skipped`);
+          const skipRes = await fetch(`${BACKEND_URL}/api/imports/${importId}/skipped`, { headers: getAuthHeaders() });
           if (skipRes.ok) {
             const skipData = await skipRes.json();
             setSkippedRows(skipData.skippedRows || []);

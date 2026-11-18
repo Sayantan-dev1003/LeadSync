@@ -1,17 +1,20 @@
-import { Router } from 'express';
+import { Router, Request, Response } from 'express';
 import { prisma } from '../lib/prisma';
+import { requireAuth } from '../middleware/auth.middleware';
+import { sanitizeLogMessage } from '../lib/sanitizer';
 
 const router = Router();
 
-router.get('/', async (req, res) => {
+router.get('/', requireAuth, async (_req: Request, res: Response) => {
   try {
     const leads = await prisma.lead.findMany({
       orderBy: { importedAt: 'desc' },
-      take: 50
+      take: 50,
     });
     res.json({ leads });
   } catch (error) {
-    console.error('Failed to fetch leads:', error);
+    const safeMsg = sanitizeLogMessage(error instanceof Error ? error.message : 'Database error');
+    console.error('Failed to fetch leads:', safeMsg);
     res.status(500).json({ error: 'Failed to fetch leads' });
   }
 });

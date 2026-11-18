@@ -8,11 +8,17 @@ import {
   XCircle,
   Search,
   ChevronDown,
+  ChevronRight,
   AlertCircle,
   FileText,
   Clock,
   ShieldAlert,
-  Sparkles,
+  MapPin,
+  Calendar,
+  User,
+  Building,
+  Tag,
+  Info,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { format } from 'date-fns';
@@ -41,7 +47,12 @@ function StatusPill({ status }: { status: CrmStatus | null | undefined }) {
     return <span className="text-xs dark:text-white/30 text-slate-400 italic">—</span>;
   }
   return (
-    <span className={clsx(CRM_STATUS_COLORS[status], 'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium')}>
+    <span
+      className={clsx(
+        CRM_STATUS_COLORS[status],
+        'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium'
+      )}
+    >
       <span className="h-1.5 w-1.5 rounded-full bg-current" />
       {CRM_STATUS_LABELS[status]}
     </span>
@@ -65,23 +76,34 @@ export function ReviewStep({
   records,
   skipped,
   failed,
-  isApproving,
-  isRejecting,
+  isApproving: _isApproving,
+  isRejecting: _isRejecting,
   approvalError,
   rejectionConfirmed,
   isExpired = false,
-  onApprove,
-  onReject,
+  onApprove: _onApprove,
+  onReject: _onReject,
   onDismissRejection,
 }: ReviewStepProps) {
   const [search, setSearch] = useState('');
-  const [showSkipped, setShowSkipped] = useState(false);
-  const [showFailed, setShowFailed] = useState(false);
   const [activeTab, setActiveTab] = useState<'valid' | 'skipped' | 'failed'>('valid');
+  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
 
   const parentRef = useRef<HTMLDivElement>(null);
 
-  // Filter records by search
+  const toggleRowExpand = (index: number) => {
+    setExpandedRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) {
+        next.delete(index);
+      } else {
+        next.add(index);
+      }
+      return next;
+    });
+  };
+
+  // Filter records by search (matches name, email, phone, company, city, state, country, note)
   const filteredRecords = useMemo(() => {
     if (!search.trim()) return records;
     const q = search.toLowerCase();
@@ -92,6 +114,9 @@ export function ReviewStep({
         r.mobile_without_country_code?.includes(q) ||
         r.company?.toLowerCase().includes(q) ||
         r.city?.toLowerCase().includes(q) ||
+        r.state?.toLowerCase().includes(q) ||
+        r.country?.toLowerCase().includes(q) ||
+        r.crm_note?.toLowerCase().includes(q) ||
         r.crm_status?.toLowerCase().includes(q)
     );
   }, [records, search]);
@@ -99,8 +124,8 @@ export function ReviewStep({
   const rowVirtualizer = useVirtualizer({
     count: filteredRecords.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 52,
-    overscan: 10,
+    estimateSize: (index) => (expandedRows.has(index) ? 260 : 52),
+    overscan: 8,
   });
 
   // Rejection confirmation screen
@@ -111,11 +136,10 @@ export function ReviewStep({
           <XCircle className="w-8 h-8 text-amber-500" />
         </div>
         <div className="max-w-md space-y-2">
-          <h3 className="text-lg font-bold dark:text-white text-slate-900">
-            Import Rejected
-          </h3>
+          <h3 className="text-lg font-bold dark:text-white text-slate-900">Import Rejected</h3>
           <p className="text-sm dark:text-white/60 text-slate-500">
-            This pending import has been rejected. No leads were written into your CRM, and staged data has been discarded.
+            This pending import has been rejected. No leads were written into your CRM, and staged data has
+            been discarded.
           </p>
         </div>
         <button
@@ -138,7 +162,10 @@ export function ReviewStep({
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold dark:text-white text-slate-900 truncate max-w-[220px]" title={filename}>
+              <span
+                className="text-sm font-semibold dark:text-white text-slate-900 truncate max-w-[220px]"
+                title={filename}
+              >
                 {filename}
               </span>
               <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 border border-amber-300/30">
@@ -153,7 +180,10 @@ export function ReviewStep({
         </div>
 
         <div className="text-xs dark:text-white/50 text-slate-500 sm:text-right shrink-0">
-          Pending ID: <span className="font-mono text-[11px] dark:text-white/70 text-slate-700">{pendingImportId.slice(0, 10)}...</span>
+          Pending ID:{' '}
+          <span className="font-mono text-[11px] dark:text-white/70 text-slate-700">
+            {pendingImportId ? `${pendingImportId.slice(0, 10)}...` : 'N/A'}
+          </span>
         </div>
       </div>
 
@@ -164,7 +194,8 @@ export function ReviewStep({
           <div className="text-sm">
             <p className="font-semibold">Pending Import Expired</p>
             <p className="text-xs opacity-90 mt-0.5">
-              This import has exceeded its temporary retention window and cannot be committed. Please upload the CSV again to proceed.
+              This import has exceeded its temporary retention window and cannot be committed. Please upload
+              the CSV again to proceed.
             </p>
           </div>
         </div>
@@ -200,7 +231,9 @@ export function ReviewStep({
             <CheckCircle2 className="w-4 h-4 text-emerald-500" />
           </div>
           <div className="text-2xl font-bold dark:text-white text-slate-900 mt-1">{records.length}</div>
-          <p className="text-[11px] text-emerald-600 dark:text-emerald-400 mt-0.5 font-medium">Ready to import</p>
+          <p className="text-[11px] text-emerald-600 dark:text-emerald-400 mt-0.5 font-medium">
+            Ready to import
+          </p>
         </div>
 
         <div
@@ -292,7 +325,7 @@ export function ReviewStep({
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
             <input
               type="text"
-              placeholder="Search extracted leads..."
+              placeholder="Search leads, city, notes..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="w-full pl-8 pr-3 py-1 text-xs rounded-lg border dark:border-white/10 border-slate-300 dark:bg-surface-900 bg-white dark:text-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-brand-500"
@@ -306,23 +339,25 @@ export function ReviewStep({
         <div className="space-y-3">
           {filteredRecords.length === 0 ? (
             <div className="py-12 text-center text-sm dark:text-white/40 text-slate-500">
-              {search ? 'No extracted records match your search filter.' : 'No valid leads extracted from this CSV.'}
+              {search
+                ? 'No extracted records match your search filter.'
+                : 'No valid leads extracted from this CSV.'}
             </div>
           ) : (
             <div className="rounded-xl border dark:border-white/10 border-slate-200 overflow-hidden shadow-sm">
               {/* Sticky Table Header */}
               <div className="overflow-x-auto">
-                <table className="data-table" style={{ minWidth: 950, tableLayout: 'fixed' }}>
+                <table className="data-table" style={{ minWidth: 960, tableLayout: 'fixed' }}>
                   <colgroup>
-                    <col style={{ width: 40 }} />
+                    <col style={{ width: 44 }} />
                     <col style={{ width: 140 }} />
                     <col style={{ width: 160 }} />
                     <col style={{ width: 130 }} />
-                    <col style={{ width: 110 }} />
-                    <col style={{ width: 120 }} />
+                    <col style={{ width: 100 }} />
                     <col style={{ width: 110 }} />
                     <col style={{ width: 110 }} />
                     <col style={{ width: 100 }} />
+                    <col style={{ width: 66 }} />
                   </colgroup>
                   <thead>
                     <tr>
@@ -333,8 +368,8 @@ export function ReviewStep({
                       <th>Date</th>
                       <th>Company</th>
                       <th>Status</th>
-                      <th>Data Source</th>
-                      <th>Lead Owner</th>
+                      <th>Source</th>
+                      <th className="text-center">Details</th>
                     </tr>
                   </thead>
                 </table>
@@ -344,7 +379,7 @@ export function ReviewStep({
               <div
                 ref={parentRef}
                 className="overflow-auto bg-white dark:bg-surface-900"
-                style={{ maxHeight: 360 }}
+                style={{ maxHeight: 380 }}
               >
                 <div
                   style={{
@@ -355,6 +390,8 @@ export function ReviewStep({
                 >
                   {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                     const r = filteredRecords[virtualRow.index];
+                    const isExpanded = expandedRows.has(virtualRow.index);
+
                     return (
                       <div
                         key={virtualRow.index}
@@ -363,43 +400,65 @@ export function ReviewStep({
                           top: 0,
                           left: 0,
                           width: '100%',
-                          height: `${virtualRow.size}px`,
+                          minHeight: `${virtualRow.size}px`,
                           transform: `translateY(${virtualRow.start}px)`,
                         }}
+                        className="border-b dark:border-white/5 border-slate-100"
                       >
                         <div className="overflow-x-auto">
-                          <table className="data-table" style={{ minWidth: 950, tableLayout: 'fixed' }}>
+                          <table className="data-table" style={{ minWidth: 960, tableLayout: 'fixed' }}>
                             <colgroup>
-                              <col style={{ width: 40 }} />
+                              <col style={{ width: 44 }} />
                               <col style={{ width: 140 }} />
                               <col style={{ width: 160 }} />
                               <col style={{ width: 130 }} />
-                              <col style={{ width: 110 }} />
-                              <col style={{ width: 120 }} />
+                              <col style={{ width: 100 }} />
                               <col style={{ width: 110 }} />
                               <col style={{ width: 110 }} />
                               <col style={{ width: 100 }} />
+                              <col style={{ width: 66 }} />
                             </colgroup>
                             <tbody>
-                              <tr className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
+                              <tr
+                                onClick={() => toggleRowExpand(virtualRow.index)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' || e.key === ' ') {
+                                    e.preventDefault();
+                                    toggleRowExpand(virtualRow.index);
+                                  }
+                                }}
+                                tabIndex={0}
+                                role="button"
+                                aria-expanded={isExpanded}
+                                className={clsx(
+                                  'hover:bg-slate-50 dark:hover:bg-white/5 transition-colors cursor-pointer',
+                                  isExpanded && 'bg-brand-50/20 dark:bg-brand-500/5'
+                                )}
+                              >
                                 <td className="text-center text-xs dark:text-white/30 text-slate-400">
                                   {virtualRow.index + 1}
                                 </td>
                                 <td className="font-medium dark:text-white text-slate-900">
                                   <div className="truncate" title={r.name || ''}>
-                                    {r.name || <span className="italic dark:text-white/30 text-slate-400 text-xs">—</span>}
+                                    {r.name || (
+                                      <span className="italic dark:text-white/30 text-slate-400 text-xs">—</span>
+                                    )}
                                   </div>
                                 </td>
                                 <td className="dark:text-white/70 text-slate-600">
                                   <div className="truncate text-xs" title={r.email || ''}>
-                                    {r.email || <span className="italic dark:text-white/30 text-slate-400">—</span>}
+                                    {r.email || (
+                                      <span className="italic dark:text-white/30 text-slate-400">—</span>
+                                    )}
                                   </div>
                                 </td>
                                 <td className="font-mono text-xs dark:text-white/70 text-slate-600">
                                   <div className="truncate">
                                     {r.country_code && r.mobile_without_country_code
                                       ? `${r.country_code} ${r.mobile_without_country_code}`
-                                      : r.mobile_without_country_code || <span className="italic dark:text-white/30 text-slate-400">—</span>}
+                                      : r.mobile_without_country_code || (
+                                          <span className="italic dark:text-white/30 text-slate-400">—</span>
+                                        )}
                                   </div>
                                 </td>
                                 <td className="text-xs dark:text-white/60 text-slate-500">
@@ -418,15 +477,86 @@ export function ReviewStep({
                                     {r.data_source || '—'}
                                   </div>
                                 </td>
-                                <td className="text-xs dark:text-white/60 text-slate-500">
-                                  <div className="truncate" title={r.lead_owner || ''}>
-                                    {r.lead_owner || '—'}
-                                  </div>
+                                <td className="text-center">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      toggleRowExpand(virtualRow.index);
+                                    }}
+                                    className="p-1 hover:bg-slate-200 dark:hover:bg-white/10 rounded transition-colors text-slate-500 dark:text-slate-400"
+                                    aria-label={isExpanded ? 'Collapse row details' : 'Expand row details'}
+                                  >
+                                    {isExpanded ? (
+                                      <ChevronDown className="w-4 h-4 text-brand-500" />
+                                    ) : (
+                                      <ChevronRight className="w-4 h-4" />
+                                    )}
+                                  </button>
                                 </td>
                               </tr>
                             </tbody>
                           </table>
                         </div>
+
+                        {/* Expandable CRM Record Details View */}
+                        {isExpanded && (
+                          <div className="p-4 bg-slate-50/80 dark:bg-surface-800/80 border-t dark:border-white/5 border-slate-100 text-xs space-y-3 animate-fade-in">
+                            <div className="font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                              <Info className="w-3.5 h-3.5 text-brand-500" />
+                              <span>Complete Extracted CRM Record</span>
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                              {/* Location Info */}
+                              <div className="p-2.5 rounded-lg bg-white dark:bg-surface-900 border dark:border-white/5 border-slate-200/80">
+                                <span className="text-[11px] font-semibold text-slate-400 dark:text-slate-500 flex items-center gap-1 mb-1">
+                                  <MapPin className="w-3 h-3" /> Location Details
+                                </span>
+                                <div className="space-y-0.5 text-slate-700 dark:text-slate-200">
+                                  <div><span className="text-slate-400">City:</span> {r.city || '—'}</div>
+                                  <div><span className="text-slate-400">State:</span> {r.state || '—'}</div>
+                                  <div><span className="text-slate-400">Country:</span> {r.country || '—'}</div>
+                                </div>
+                              </div>
+
+                              {/* Timeline & Ownership */}
+                              <div className="p-2.5 rounded-lg bg-white dark:bg-surface-900 border dark:border-white/5 border-slate-200/80">
+                                <span className="text-[11px] font-semibold text-slate-400 dark:text-slate-500 flex items-center gap-1 mb-1">
+                                  <Clock className="w-3 h-3" /> Timeline & Ownership
+                                </span>
+                                <div className="space-y-0.5 text-slate-700 dark:text-slate-200">
+                                  <div><span className="text-slate-400">Lead Owner:</span> {r.lead_owner || '—'}</div>
+                                  <div><span className="text-slate-400">Possession:</span> {r.possession_time || '—'}</div>
+                                  <div><span className="text-slate-400">Created:</span> {r.created_at || '—'}</div>
+                                </div>
+                              </div>
+
+                              {/* Description & Source */}
+                              <div className="p-2.5 rounded-lg bg-white dark:bg-surface-900 border dark:border-white/5 border-slate-200/80">
+                                <span className="text-[11px] font-semibold text-slate-400 dark:text-slate-500 flex items-center gap-1 mb-1">
+                                  <Tag className="w-3 h-3" /> Source & Description
+                                </span>
+                                <div className="space-y-0.5 text-slate-700 dark:text-slate-200">
+                                  <div><span className="text-slate-400">Data Source:</span> {r.data_source || '—'}</div>
+                                  <div><span className="text-slate-400">Description:</span> {r.description || '—'}</div>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Catch-all CRM Note */}
+                            {r.crm_note && (
+                              <div className="p-2.5 rounded-lg bg-white dark:bg-surface-900 border dark:border-white/5 border-slate-200/80">
+                                <span className="text-[11px] font-semibold text-slate-400 dark:text-slate-500 block mb-1">
+                                  CRM Note & Remarks (Catch-all)
+                                </span>
+                                <p className="text-slate-700 dark:text-slate-300 font-mono text-[11px] whitespace-pre-wrap">
+                                  {r.crm_note}
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -458,8 +588,12 @@ export function ReviewStep({
                   </div>
                   <div className="flex flex-wrap gap-1.5 font-mono text-[11px]">
                     {Object.entries(s.row).map(([k, v]) => (
-                      <span key={k} className="px-2 py-0.5 rounded bg-white dark:bg-surface-800 border dark:border-white/5 border-slate-200 text-slate-600 dark:text-slate-300">
-                        <span className="font-semibold text-slate-400 dark:text-slate-500">{k}:</span> {String(v || '—')}
+                      <span
+                        key={k}
+                        className="px-2 py-0.5 rounded bg-white dark:bg-surface-800 border dark:border-white/5 border-slate-200 text-slate-600 dark:text-slate-300"
+                      >
+                        <span className="font-semibold text-slate-400 dark:text-slate-500">{k}:</span>{' '}
+                        {String(v || '—')}
                       </span>
                     ))}
                   </div>
@@ -474,9 +608,7 @@ export function ReviewStep({
       {activeTab === 'failed' && (
         <div className="space-y-3">
           {failed.length === 0 ? (
-            <div className="py-8 text-center text-sm dark:text-white/40 text-slate-500">
-              No failed rows.
-            </div>
+            <div className="py-8 text-center text-sm dark:text-white/40 text-slate-500">No failed rows.</div>
           ) : (
             <div className="rounded-xl border dark:border-red-500/20 border-red-200 overflow-hidden divide-y dark:divide-white/5 divide-slate-100 max-h-80 overflow-y-auto">
               {failed.map((f, idx) => (
@@ -485,14 +617,16 @@ export function ReviewStep({
                     <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">
                       Row #{idx + 1}
                     </span>
-                    <span className="text-xs font-medium text-red-700 dark:text-red-300">
-                      {f.reason}
-                    </span>
+                    <span className="text-xs font-medium text-red-700 dark:text-red-300">{f.reason}</span>
                   </div>
                   <div className="flex flex-wrap gap-1.5 font-mono text-[11px]">
                     {Object.entries(f.row).map(([k, v]) => (
-                      <span key={k} className="px-2 py-0.5 rounded bg-white dark:bg-surface-800 border dark:border-white/5 border-slate-200 text-slate-600 dark:text-slate-300">
-                        <span className="font-semibold text-slate-400 dark:text-slate-500">{k}:</span> {String(v || '—')}
+                      <span
+                        key={k}
+                        className="px-2 py-0.5 rounded bg-white dark:bg-surface-800 border dark:border-white/5 border-slate-200 text-slate-600 dark:text-slate-300"
+                      >
+                        <span className="font-semibold text-slate-400 dark:text-slate-500">{k}:</span>{' '}
+                        {String(v || '—')}
                       </span>
                     ))}
                   </div>
