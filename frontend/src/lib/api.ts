@@ -8,12 +8,16 @@ export interface ExtractProgressEvent {
   totalBatches: number;
   batchRecords: CRMRecord[];
   batchSkipped: SkippedRow[];
+  /** Rows that failed AI extraction or validation — distinct from skipped rows. */
+  batchFailed?: Array<{ row: Record<string, string>; reason: string }>;
 }
 
 export interface ExtractCompleteEvent {
   type: 'complete';
   totalImported: number;
   totalSkipped: number;
+  /** Rows that failed AI extraction or validation after all retries. */
+  totalFailed?: number;
   importId?: string;
 }
 
@@ -27,7 +31,15 @@ export type ExtractEvent = ExtractProgressEvent | ExtractCompleteEvent | Extract
 /**
  * Streams AI extraction results from the backend via fetch + ReadableStream.
  * Calls onEvent for each SSE event as it arrives.
- * Returns a promise that resolves when the stream ends.
+ *
+ * Resolves when the stream ends with a 'complete' event.
+ * Rejects when:
+ *   - The HTTP response is not OK.
+ *   - The backend sends an 'error' event.
+ *   - The stream ends without a 'complete' event (interrupted stream).
+ *
+ * This ensures callers cannot accidentally treat a failed or interrupted import
+ * as a successful one.
  */
 export async function extractLeads(
   file: File,
@@ -59,6 +71,8 @@ export async function extractLeads(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let receivedCompleteEvent = false;
+  let errorFromStream: string | null = null;
 
   try {
     while (true) {
@@ -78,14 +92,35 @@ export async function extractLeads(
           try {
             const event = JSON.parse(jsonStr) as ExtractEvent;
             onEvent(event);
+
+            if (event.type === 'complete') {
+              receivedCompleteEvent = true;
+            } else if (event.type === 'error') {
+              // Store the error; we'll throw after the loop so the reader is released
+              errorFromStream = event.message;
+            }
           } catch (parseErr) {
-            console.warn('Failed to parse SSE event:', jsonStr, parseErr);
+            console.warn('Failed to parse SSE event — skipping malformed frame');
           }
         }
+      }
+
+      // Stop reading once we've received a terminal event
+      if (receivedCompleteEvent || errorFromStream !== null) {
+        break;
       }
     }
   } finally {
     reader.releaseLock();
+  }
+
+  // Throw after the reader is released so the connection is cleaned up properly
+  if (errorFromStream !== null) {
+    throw new Error(errorFromStream);
+  }
+
+  if (!receivedCompleteEvent) {
+    throw new Error('Import stream ended without a completion event — the import may be incomplete');
   }
 }
 

@@ -1,14 +1,13 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import {
-  type AIExtractedRow,
   type BatchResult,
   type CRMRecord,
+  type FailedRow,
   type RawRow,
   type SkippedRow,
-  CRM_STATUS_VALUES,
-  DATA_SOURCE_VALUES,
 } from '../types';
-import { validateCrmStatus, validateDataSource, normalizeDateString, shouldSkipRow } from './validators.service';
+import { validateAIBatch } from './zodSchemas.service';
+import { shouldSkipRow } from './validators.service';
 
 const SYSTEM_PROMPT = `You are a data-mapping engine for a CRM system called GrowEasy. Your ONLY job is to receive raw CSV row objects with arbitrary, inconsistent, or messy column names and map each row's data onto a fixed CRM schema.
 
@@ -139,9 +138,10 @@ function stripMarkdownFences(text: string): string {
 }
 
 /**
- * Sanitizes and parses an AI JSON response into an array of AIExtractedRow objects.
+ * Parses raw AI text into an unknown array, eligible for Zod validation.
+ * Throws a descriptive error (eligible for retry) on malformed JSON or non-array.
  */
-function parseAIResponse(rawText: string, batchSize: number): AIExtractedRow[] {
+function parseAIResponseText(rawText: string): unknown {
   const cleaned = stripMarkdownFences(rawText);
 
   let parsed: unknown;
@@ -151,39 +151,31 @@ function parseAIResponse(rawText: string, batchSize: number): AIExtractedRow[] {
     // Attempt to extract JSON array from response
     const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
     if (!arrayMatch) {
-      throw new Error(`AI response is not valid JSON: ${cleaned.slice(0, 200)}`);
+      throw new Error(`AI response is not valid JSON — eligible for retry: ${cleaned.slice(0, 100)}`);
     }
-    parsed = JSON.parse(arrayMatch[0]);
+    try {
+      parsed = JSON.parse(arrayMatch[0]);
+    } catch {
+      throw new Error(`AI response contains malformed JSON — eligible for retry: ${cleaned.slice(0, 100)}`);
+    }
   }
 
-  if (!Array.isArray(parsed)) {
-    throw new Error('AI response is not a JSON array');
-  }
-
-  // Ensure we have the right number of records
-  if (parsed.length !== batchSize) {
-    console.warn(`AI returned ${parsed.length} records for batch of ${batchSize}`);
-  }
-
-  return parsed as AIExtractedRow[];
-}
-
-/**
- * Post-processes a single AI-extracted row to enforce enum constraints
- * and clean up any invalid values that slipped through.
- */
-function postProcessRow(row: AIExtractedRow): AIExtractedRow {
-  return {
-    ...row,
-    created_at: row.created_at ? normalizeDateString(row.created_at) : null,
-    crm_status: validateCrmStatus(row.crm_status),
-    data_source: validateDataSource(row.data_source),
-  };
+  return parsed;
 }
 
 /**
  * Sends a single batch of raw rows to Gemini for field extraction.
- * Throws on unrecoverable error (caller handles retry).
+ *
+ * Returns a BatchResult with:
+ * - records: validated CRM records ready for DB persistence
+ * - skipped: rows without contact info (deliberate skip)
+ * - failed: rows that could not be parsed/validated (AI or schema error)
+ *
+ * Throws on unrecoverable structural errors (wrong type, wrong length) so the
+ * caller (withRetry) can retry the whole batch.
+ *
+ * Individual row validation failures are reported as failed rows without
+ * causing the whole batch to be retried.
  */
 export async function extractBatch(rawRows: RawRow[]): Promise<BatchResult> {
   const m = getModel();
@@ -193,32 +185,53 @@ export async function extractBatch(rawRows: RawRow[]): Promise<BatchResult> {
   const result = await m.generateContent(prompt);
   const responseText = result.response.text();
 
-  const extracted = parseAIResponse(responseText, rawRows.length);
+  // Parse: may throw for retry-eligible structural errors
+  const parsedUnknown = parseAIResponseText(responseText);
+
+  // Validate array length and structure: may throw for retry-eligible errors
+  const validationResults = validateAIBatch(parsedUnknown, rawRows.length);
 
   const records: CRMRecord[] = [];
   const skipped: SkippedRow[] = [];
+  const failed: FailedRow[] = [];
 
-  extracted.forEach((row, index) => {
-    const processed = postProcessRow(row);
+  validationResults.forEach((result, index) => {
+    const rawRow = rawRows[index] ?? {};
 
-    // Enforce skip rule server-side as a safety net
-    const emailEmpty = !processed.email?.trim();
-    const mobileEmpty = !processed.mobile_without_country_code?.trim();
-    const aiSaysSkip = processed.skip === true;
-
-    if (aiSaysSkip || (emailEmpty && mobileEmpty)) {
-      skipped.push({
-        row: rawRows[index] ?? {},
-        reason: processed.skipReason || 'No email or mobile number found',
+    if (!result.success) {
+      // Validation failure — report as failed (not silently dropped)
+      failed.push({
+        row: rawRow,
+        reason: `Validation error: ${result.error}`,
       });
-    } else {
-      // Strip the skip fields before adding to records
-      const { skip: _skip, skipReason: _skipReason, ...crmRecord } = processed;
-      records.push(crmRecord as CRMRecord);
+      return;
     }
+
+    const validated = result.data;
+
+    // -----------------------------------------------------------------------
+    // Server-side skip determination (authoritative — overrides AI hint)
+    // The AI's skip flag is advisory. We always recompute from validated data.
+    // This prevents the model from silently discarding rows that have contact info.
+    // -----------------------------------------------------------------------
+    const serverShouldSkip = shouldSkipRow(validated.email, validated.mobile_without_country_code);
+
+    if (serverShouldSkip) {
+      // Only skip when server agrees there truly is no contact info
+      skipped.push({
+        row: rawRow,
+        reason: 'No email or mobile number found',
+      });
+      return;
+    }
+
+    // Row has contact info — always process it, regardless of AI skip hint
+    // Strip the advisory skip fields before building the CRM record
+    const { skip: _skip, skipReason: _skipReason, ...crmFields } = validated;
+    records.push(crmFields as CRMRecord);
   });
 
-  return { records, skipped };
+  return { records, skipped, failed };
 }
 
 /**
@@ -239,7 +252,9 @@ export async function withRetry<T>(
       if (attempt === maxAttempts) break;
 
       const delay = baseDelayMs * Math.pow(2, attempt - 1);
-      console.warn(`Batch attempt ${attempt} failed. Retrying in ${delay}ms...`, err);
+      // Log the error class/message but not full stack traces or data contents
+      const errMessage = err instanceof Error ? err.message : 'Unknown error';
+      console.warn(`Batch attempt ${attempt} failed (${errMessage}). Retrying in ${delay}ms...`);
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }

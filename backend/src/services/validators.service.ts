@@ -29,6 +29,7 @@ export function validateDataSource(value: unknown): DataSource | null {
 /**
  * Determines whether a row should be skipped.
  * A row is skipped if it has neither an email nor a mobile number.
+ * This is authoritative — the AI's skip hint is advisory only.
  */
 export function shouldSkipRow(email: string | null | undefined, mobile: string | null | undefined): boolean {
   const hasEmail = typeof email === 'string' && email.trim().length > 0;
@@ -53,7 +54,7 @@ export function parsePhoneNumber(phone: string): { countryCode: string | null; m
   const plusSepMatch = raw.match(/^(\+\d{1,3})[\s\-.](.+)$/);
   if (plusSepMatch) {
     const countryCode = plusSepMatch[1];
-    const mobile = plusSepMatch[2].replace(/[\s\-.()\+]/g, '').replace(/\D/g, '');
+    const mobile = plusSepMatch[2].replace(/[\s\-.()\\+]/g, '').replace(/\D/g, '');
     return { countryCode, mobile };
   }
 
@@ -70,7 +71,7 @@ export function parsePhoneNumber(phone: string): { countryCode: string | null; m
   const doubleZeroSepMatch = raw.match(/^00(\d{1,3})[\s\-.](.+)$/);
   if (doubleZeroSepMatch) {
     const countryCode = `+${doubleZeroSepMatch[1]}`;
-    const mobile = doubleZeroSepMatch[2].replace(/[\s\-.()\+]/g, '').replace(/\D/g, '');
+    const mobile = doubleZeroSepMatch[2].replace(/[\s\-.()\\+]/g, '').replace(/\D/g, '');
     return { countryCode, mobile };
   }
 
@@ -86,20 +87,21 @@ export function parsePhoneNumber(phone: string): { countryCode: string | null; m
 
 
 /**
- * Normalizes a date string to ISO 8601, parseable by new Date().
- * Returns the original string if it cannot be normalized.
+ * Normalizes a date string to ISO 8601.
+ * Returns null (never the original garbage string) if the date cannot be parsed.
+ * This ensures Prisma never receives an invalid Date object.
  */
 export function normalizeDateString(dateStr: string | null | undefined): string | null {
   if (!dateStr || !dateStr.trim()) return null;
 
-  // Already ISO-ish
+  // Already ISO-ish or some other JS-parseable format
   const attempt = new Date(dateStr);
   if (!isNaN(attempt.getTime())) {
     return attempt.toISOString();
   }
 
   // Try common Indian date formats: DD/MM/YYYY, DD-MM-YYYY
-  const dmyMatch = dateStr.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/);
+  const dmyMatch = dateStr.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})/);
   if (dmyMatch) {
     const [, day, month, year] = dmyMatch;
     const attempt2 = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`);
@@ -108,7 +110,8 @@ export function normalizeDateString(dateStr: string | null | undefined): string 
     }
   }
 
-  return dateStr; // Return as-is if we can't parse it
+  // Cannot parse — return null so invalid dates never reach Prisma
+  return null;
 }
 
 /**

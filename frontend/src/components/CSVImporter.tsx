@@ -36,9 +36,6 @@ export function CSVImporter() {
         if (event.type === 'progress') {
           const pct = Math.round((event.batchIndex / event.totalBatches) * 100);
           setProgressPct(pct);
-        } else if (event.type === 'error') {
-          alert(`Extraction error: ${event.message}`);
-          setIsUploading(false);
         } else if (event.type === 'complete') {
           // Navigate to manage leads after successful upload
           setIsOpen(false);
@@ -59,10 +56,14 @@ export function CSVImporter() {
             setProgressPct(0);
           }, 500);
         }
+        // Note: 'error' events are no longer handled here — extractLeads now
+        // rejects the promise on error events, so the catch block below handles them.
       });
     } catch (error) {
-      console.error('Failed to upload file:', error);
-      alert('Failed to upload file. Please try again.');
+      // This catches: network errors, backend error events, and interrupted streams
+      const message = error instanceof Error ? error.message : 'Failed to upload file. Please try again.';
+      console.error('Upload failed');
+      alert(`Import failed: ${message}`);
       setIsUploading(false);
     }
   };

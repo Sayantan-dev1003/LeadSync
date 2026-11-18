@@ -65,6 +65,8 @@ export interface ImportResult {
   skipped: SkippedRow[];
   totalImported: number;
   totalSkipped: number;
+  /** Rows that failed AI extraction or validation after all retries. */
+  totalFailed?: number;
   importId?: string;
 }
 

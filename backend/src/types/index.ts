@@ -41,10 +41,17 @@ export interface CRMRecord {
 
 export interface AIExtractedRow extends CRMRecord {
   skip?: boolean;
-  skipReason?: string;
+  skipReason?: string | null;
 }
 
+/** A row that was deliberately skipped (no contact info). */
 export interface SkippedRow {
+  row: RawRow;
+  reason: string;
+}
+
+/** A row that failed due to AI/validation/DB error. */
+export interface FailedRow {
   row: RawRow;
   reason: string;
 }
@@ -52,14 +59,18 @@ export interface SkippedRow {
 export interface BatchResult {
   records: CRMRecord[];
   skipped: SkippedRow[];
+  /** Rows that could not be processed due to AI or validation failure. */
+  failed: FailedRow[];
 }
 
 export interface ImportResult {
   importId?: string;
   records: CRMRecord[];
   skipped: SkippedRow[];
+  failed: FailedRow[];
   totalImported: number;
   totalSkipped: number;
+  totalFailed: number;
 }
 
 export interface SSEProgressEvent {
@@ -68,12 +79,14 @@ export interface SSEProgressEvent {
   totalBatches: number;
   batchRecords: CRMRecord[];
   batchSkipped: SkippedRow[];
+  batchFailed: FailedRow[];
 }
 
 export interface SSECompleteEvent {
   type: 'complete';
   totalImported: number;
   totalSkipped: number;
+  totalFailed: number;
   importId?: string;
 }
 

@@ -123,8 +123,9 @@ describe('normalizeDateString', () => {
     expect(normalizeDateString('')).toBeNull();
   });
 
-  it('returns string as-is for unparseable dates', () => {
+  it('returns null for unparseable dates (never forward garbage to Prisma)', () => {
+    // Previously returned the original string — now must return null
     const result = normalizeDateString('not-a-date');
-    expect(result).toBe('not-a-date');
+    expect(result).toBeNull();
   });
 });
