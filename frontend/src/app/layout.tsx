@@ -1,14 +1,16 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import { ThemeProvider } from '@/components/ThemeProvider';
+import { AuthProvider } from '@/context/AuthContext';
 import { Sidebar } from '@/components/Sidebar';
+import { Navbar } from '@/components/Navbar';
 
 export const metadata: Metadata = {
-  title: 'GrowEasy',
+  title: 'LeadSync',
   description: 'Manage and control your lead channels',
-  keywords: ['CRM', 'CSV importer', 'lead import', 'GrowEasy'],
+  keywords: ['CRM', 'CSV importer', 'lead import', 'LeadSync', 'GrowEasy'],
   openGraph: {
-    title: 'GrowEasy',
+    title: 'LeadSync',
     description: 'Manage your leads',
     type: 'website',
   },
@@ -40,12 +42,17 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body className="min-h-screen bg-slate-50 dark:bg-[#111317]">
         <ThemeProvider>
-          <div className="flex h-screen overflow-hidden flex-col md:flex-row">
-            <Sidebar />
-            <div className="flex-1 overflow-y-auto">
-              {children}
+          <AuthProvider>
+            <div className="flex h-screen overflow-hidden flex-col md:flex-row">
+              <Sidebar />
+              <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+                <Navbar />
+                <div className="flex-1 overflow-y-auto">
+                  {children}
+                </div>
+              </div>
             </div>
-          </div>
+          </AuthProvider>
         </ThemeProvider>
       </body>
     </html>

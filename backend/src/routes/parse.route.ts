@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import { parseCSVBuffer } from '../services/csvParser.service';
+import { requireOwner } from '../middleware/auth.middleware';
 import type { ParseCSVResult } from '../types';
 
 const router = Router();
@@ -21,9 +22,9 @@ const upload = multer({
 /**
  * POST /api/parse
  * Accepts a CSV file upload, parses it client-side-style on the server,
- * and returns raw rows + headers. No AI involvement.
+ * and returns raw rows + headers. Protected with requireOwner.
  */
-router.post('/', upload.single('file'), (req: Request, res: Response): void => {
+router.post('/', requireOwner, upload.single('file'), (req: Request, res: Response): void => {
   if (!req.file) {
     res.status(400).json({ error: 'No file uploaded' });
     return;

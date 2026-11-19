@@ -1,6 +1,9 @@
 import type { CRMRecord, SkippedRow, FailedRow, ApproveResponse, RejectResponse, PendingImportDTO } from '@/types';
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
+const BACKEND_URL =
+  typeof window !== 'undefined'
+    ? (process.env.NEXT_PUBLIC_BACKEND_URL || '')
+    : (process.env.BACKEND_PROXY_URL || process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000');
 
 export function getAuthToken(): string | null {
   if (typeof window !== 'undefined') {
@@ -59,7 +62,7 @@ export type ExtractEvent = ExtractProgressEvent | ExtractCompleteEvent | Extract
  * Strict validation:
  * - Rejects if complete event lacks a valid pendingImportId.
  * - Rejects if stream ends without complete event.
- * - Attaches authorization headers.
+ * - Attaches authorization headers and credentials.
  */
 export async function extractLeads(
   file: File,
@@ -71,6 +74,7 @@ export async function extractLeads(
 
   const response = await fetch(`${BACKEND_URL}/api/extract`, {
     method: 'POST',
+    credentials: 'include',
     headers: {
       ...getAuthHeaders(),
     },
@@ -185,7 +189,10 @@ export async function extractLeads(
  */
 export async function checkHealth(): Promise<boolean> {
   try {
-    const res = await fetch(`${BACKEND_URL}/health`, { signal: AbortSignal.timeout(3000) });
+    const res = await fetch(`${BACKEND_URL}/health`, {
+      credentials: 'include',
+      signal: AbortSignal.timeout(3000),
+    });
     return res.ok;
   } catch {
     return false;
@@ -202,6 +209,7 @@ export async function approvePendingImport(pendingImportId: string): Promise<App
 
   const response = await fetch(`${BACKEND_URL}/api/imports/${pendingImportId}/approve`, {
     method: 'POST',
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       ...getAuthHeaders(),
@@ -230,6 +238,7 @@ export async function rejectPendingImport(pendingImportId: string): Promise<Reje
 
   const response = await fetch(`${BACKEND_URL}/api/imports/${pendingImportId}/reject`, {
     method: 'POST',
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       ...getAuthHeaders(),
@@ -257,6 +266,7 @@ export async function getPendingImport(pendingImportId: string): Promise<Pending
   }
 
   const response = await fetch(`${BACKEND_URL}/api/imports/pending/${pendingImportId}`, {
+    credentials: 'include',
     headers: {
       ...getAuthHeaders(),
     },

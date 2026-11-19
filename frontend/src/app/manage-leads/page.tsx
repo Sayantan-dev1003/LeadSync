@@ -4,11 +4,14 @@ export const dynamic = 'force-dynamic';
 
 import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { DarkModeToggle } from '@/components/DarkModeToggle';
-import { Search, RefreshCw, ChevronRight } from 'lucide-react';
+import { Search, RefreshCw, Inbox, Lock } from 'lucide-react';
 import { getAuthHeaders } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
+const BACKEND_URL =
+  typeof window !== 'undefined'
+    ? (process.env.NEXT_PUBLIC_BACKEND_URL || '')
+    : (process.env.BACKEND_PROXY_URL || process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000');
 
 interface Lead {
   id: string;
@@ -34,33 +37,53 @@ interface SkippedRow {
   reason: string;
 }
 
-
 function ManageLeadsContent() {
   const searchParams = useSearchParams();
   const importId = searchParams.get('importId');
+  const { isAuthenticated, isLoading: isAuthLoading, login } = useAuth();
+
   const [leads, setLeads] = useState<Lead[]>([]);
   const [skippedRows, setSkippedRows] = useState<SkippedRow[]>([]);
   const [importJob, setImportJob] = useState<ImportJob | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState<'parsed' | 'skipped'>('parsed');
 
   const fetchLeads = async (currentSearch = searchQuery) => {
+    // Phase 6: Never query owner-only endpoints in public unauthenticated mode
+    if (!isAuthenticated) {
+      setLeads([]);
+      setSkippedRows([]);
+      setImportJob(null);
+      setIsLoading(false);
+      return;
+    }
+
     try {
       setIsLoading(true);
       const searchParam = currentSearch ? `?search=${encodeURIComponent(currentSearch)}` : '';
       const url = importId 
         ? `${BACKEND_URL}/api/imports/${importId}/leads${searchParam}`
         : `${BACKEND_URL}/api/leads${searchParam}`;
-      const res = await fetch(url, { headers: getAuthHeaders() });
+
+      const res = await fetch(url, {
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+
       if (res.ok) {
         const data = await res.json();
         setLeads(data.leads || []);
+      } else {
+        setLeads([]);
       }
       
       if (importId) {
         // Fetch stats
-        const statsRes = await fetch(`${BACKEND_URL}/api/imports/${importId}`, { headers: getAuthHeaders() });
+        const statsRes = await fetch(`${BACKEND_URL}/api/imports/${importId}`, {
+          credentials: 'include',
+          headers: getAuthHeaders(),
+        });
         if (statsRes.ok) {
           const statsData = await statsRes.json();
           setImportJob(statsData.importJob);
@@ -68,7 +91,10 @@ function ManageLeadsContent() {
         
         // Fetch skipped if tab is skipped
         if (activeTab === 'skipped') {
-          const skipRes = await fetch(`${BACKEND_URL}/api/imports/${importId}/skipped`, { headers: getAuthHeaders() });
+          const skipRes = await fetch(`${BACKEND_URL}/api/imports/${importId}/skipped`, {
+            credentials: 'include',
+            headers: getAuthHeaders(),
+          });
           if (skipRes.ok) {
             const skipData = await skipRes.json();
             setSkippedRows(skipData.skippedRows || []);
@@ -77,6 +103,7 @@ function ManageLeadsContent() {
       }
     } catch (error) {
       console.error('Error fetching leads:', error);
+      setLeads([]);
     } finally {
       setIsLoading(false);
     }
@@ -84,7 +111,7 @@ function ManageLeadsContent() {
 
   useEffect(() => {
     fetchLeads();
-  }, [importId, activeTab]);
+  }, [importId, activeTab, isAuthenticated]);
 
   const handleSearch = (e: React.ChangeEvent<HTMLInputElement>) => {
     setSearchQuery(e.target.value);
@@ -92,7 +119,9 @@ function ManageLeadsContent() {
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    fetchLeads(searchQuery);
+    if (isAuthenticated) {
+      fetchLeads(searchQuery);
+    }
   };
 
   const getStatusBadge = (status: string | null) => {
@@ -111,7 +140,6 @@ function ManageLeadsContent() {
       case 'Bad Lead':
         return <span className="px-2 py-1 bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 rounded-md text-xs font-medium">Bad Lead</span>;
       default:
-        // Format unknown status cleanly (e.g. "SOME_STATUS" -> "Some Status")
         const formatted = status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
         return <span className="px-2 py-1 bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 rounded-md text-xs font-medium">{formatted}</span>;
     }
@@ -134,12 +162,9 @@ function ManageLeadsContent() {
             Monitor lead status, assign tasks, and close deals faster.
           </p>
         </div>
-        <div className="hidden sm:block">
-          <DarkModeToggle />
-        </div>
       </div>
 
-      {importId && importJob && (
+      {isAuthenticated && importId && importJob && (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6">
           <div 
             onClick={() => setActiveTab('parsed')}
@@ -179,16 +204,25 @@ function ManageLeadsContent() {
             <form onSubmit={handleSearchSubmit} className="relative flex-1 sm:flex-none w-full sm:w-auto">
               <input 
                 type="text" 
-                placeholder="Search email or phone..." 
+                placeholder={isAuthenticated ? "Search email or phone..." : "Sign in to search leads..."} 
                 value={searchQuery}
+                disabled={!isAuthenticated}
                 onChange={handleSearch}
-                className="pl-4 pr-10 py-2 w-full sm:w-64 text-sm rounded-lg border dark:border-white/10 border-slate-300 dark:bg-surface-900 bg-white dark:text-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-500"
+                className="pl-4 pr-10 py-2 w-full sm:w-64 text-sm rounded-lg border dark:border-white/10 border-slate-300 dark:bg-surface-900 bg-white dark:text-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-60 disabled:cursor-not-allowed"
               />
-              <button type="submit" className="absolute right-2 top-1/2 -translate-y-1/2 p-1 bg-brand-500 rounded text-white hover:bg-brand-600 transition-colors">
+              <button 
+                type="submit" 
+                disabled={!isAuthenticated}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 bg-brand-500 rounded text-white hover:bg-brand-600 transition-colors disabled:opacity-50"
+              >
                 <Search className="w-4 h-4" />
               </button>
             </form>
-            <button onClick={() => fetchLeads()} className="p-2 shrink-0 border dark:border-white/10 border-slate-300 rounded-lg hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
+            <button 
+              onClick={() => fetchLeads()} 
+              disabled={!isAuthenticated}
+              className="p-2 shrink-0 border dark:border-white/10 border-slate-300 rounded-lg hover:bg-slate-50 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
+            >
               <RefreshCw className={`w-4 h-4 dark:text-slate-400 text-slate-500 ${isLoading ? 'animate-spin' : ''}`} />
             </button>
           </div>
@@ -197,7 +231,7 @@ function ManageLeadsContent() {
         {/* Table */}
         <div className="overflow-x-auto">
           {activeTab === 'parsed' ? (
-          <table className="w-full text-left text-sm">
+          <table className="w-full text-left text-sm" data-testid="leads-table">
             <thead>
               <tr className="border-b dark:border-white/10 border-slate-200 bg-slate-50 dark:bg-surface-700/50">
                 <th className="px-6 py-4 font-bold text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Lead Name</th>
@@ -211,15 +245,38 @@ function ManageLeadsContent() {
               </tr>
             </thead>
             <tbody className="divide-y dark:divide-white/5 divide-slate-100">
-              {isLoading ? (
+              {isAuthLoading || isLoading ? (
                 <tr>
                   <td colSpan={8} className="px-6 py-8 text-center text-slate-500 dark:text-slate-400">
                     Loading leads...
                   </td>
                 </tr>
+              ) : !isAuthenticated ? (
+                /* Phase 6: Public Empty Read-Only Mode */
+                <tr>
+                  <td colSpan={8} className="px-6 py-12 text-center" data-testid="public-empty-leads">
+                    <div className="max-w-md mx-auto">
+                      <div className="w-12 h-12 rounded-full bg-slate-100 dark:bg-white/5 text-slate-400 flex items-center justify-center mx-auto mb-3">
+                        <Lock className="w-6 h-6" />
+                      </div>
+                      <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">
+                        Public Read-Only Mode
+                      </p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                        Zero leads displayed. All CRM data is private to the authenticated owner. Sign in with Google to view and manage your leads.
+                      </p>
+                      <button
+                        onClick={login}
+                        className="mt-4 inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-lg bg-white dark:bg-surface-700 border border-slate-300 dark:border-white/10 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-surface-600 transition-colors shadow-sm"
+                      >
+                        Sign in with Google as Owner
+                      </button>
+                    </div>
+                  </td>
+                </tr>
               ) : leads.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-6 py-8 text-center text-slate-500 dark:text-slate-400">
+                  <td colSpan={8} className="px-6 py-8 text-center text-slate-500 dark:text-slate-400" data-testid="owner-empty-leads">
                     No leads found. Import some leads via CSV to get started!
                   </td>
                 </tr>
@@ -239,10 +296,8 @@ function ManageLeadsContent() {
                         —
                       </span>
                     </td>
-                    <td className="px-6 py-4 text-right whitespace-nowrap">
-                      <button className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors border dark:border-white/10 border-slate-200 rounded-md bg-white dark:bg-surface-700">
-                        More <ChevronRight className="w-3 h-3" />
-                      </button>
+                    <td className="px-6 py-4 whitespace-nowrap text-right">
+                      <span className="text-xs text-slate-400 dark:text-slate-500 font-medium">View</span>
                     </td>
                   </tr>
                 ))
@@ -253,33 +308,25 @@ function ManageLeadsContent() {
           <table className="w-full text-left text-sm">
             <thead>
               <tr className="border-b dark:border-white/10 border-slate-200 bg-slate-50 dark:bg-surface-700/50">
-                <th className="px-6 py-4 font-bold text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400 w-1/3">Reason</th>
-                <th className="px-6 py-4 font-bold text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Raw Data</th>
+                <th className="px-6 py-4 font-bold text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Row Data</th>
+                <th className="px-6 py-4 font-bold text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Reason for Skipping</th>
               </tr>
             </thead>
             <tbody className="divide-y dark:divide-white/5 divide-slate-100">
-              {isLoading ? (
+              {skippedRows.length === 0 ? (
                 <tr>
                   <td colSpan={2} className="px-6 py-8 text-center text-slate-500 dark:text-slate-400">
-                    Loading skipped records...
-                  </td>
-                </tr>
-              ) : skippedRows.length === 0 ? (
-                <tr>
-                  <td colSpan={2} className="px-6 py-8 text-center text-slate-500 dark:text-slate-400">
-                    No skipped records found.
+                    No skipped rows recorded for this import.
                   </td>
                 </tr>
               ) : (
                 skippedRows.map((row) => (
-                  <tr key={row.id} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className="px-2 py-1 bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-400 rounded-md text-xs font-medium">
-                        {row.reason}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 font-mono text-xs dark:text-slate-400 text-slate-500 break-all whitespace-nowrap">
+                  <tr key={row.id}>
+                    <td className="px-6 py-4 font-mono text-xs dark:text-white/70 text-slate-600 max-w-md truncate">
                       {row.rawRow}
+                    </td>
+                    <td className="px-6 py-4 text-xs font-medium text-rose-600 dark:text-rose-400">
+                      {row.reason}
                     </td>
                   </tr>
                 ))
@@ -288,15 +335,6 @@ function ManageLeadsContent() {
           </table>
           )}
         </div>
-
-        {/* Footer / Load More */}
-        {activeTab === 'parsed' && leads.length > 0 && (
-          <div className="p-4 border-t dark:border-white/10 border-slate-200 flex justify-center">
-            <button className="px-6 py-2 border dark:border-orange-500/30 border-orange-200 text-orange-600 dark:text-orange-400 font-medium text-sm rounded-lg hover:bg-orange-50 dark:hover:bg-orange-500/10 transition-colors">
-              Load more
-            </button>
-          </div>
-        )}
       </div>
     </main>
   );
@@ -304,7 +342,7 @@ function ManageLeadsContent() {
 
 export default function ManageLeadsPage() {
   return (
-    <Suspense fallback={<div className="min-h-screen p-4 md:p-8 flex items-center justify-center">Loading...</div>}>
+    <Suspense fallback={<div className="p-8 text-slate-500">Loading leads dashboard...</div>}>
       <ManageLeadsContent />
     </Suspense>
   );

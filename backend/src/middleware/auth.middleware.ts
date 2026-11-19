@@ -1,12 +1,15 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
+import prisma from '../lib/prisma';
 
-export type UserRole = 'admin' | 'reviewer' | 'user';
+export type UserRole = 'admin' | 'reviewer' | 'user' | 'owner';
 
 export interface AuthUser {
   id: string;
   role: UserRole;
   email?: string;
+  name?: string | null;
+  picture?: string | null;
 }
 
 declare global {
@@ -20,11 +23,33 @@ declare global {
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 
 /**
+ * Helper to parse cookies from the Cookie header.
+ */
+export function parseCookies(cookieHeader: string | undefined): Record<string, string> {
+  const cookies: Record<string, string> = {};
+  if (!cookieHeader) return cookies;
+  cookieHeader.split(';').forEach((pair) => {
+    const idx = pair.indexOf('=');
+    if (idx === -1) return;
+    const key = pair.substring(0, idx).trim();
+    const val = pair.substring(idx + 1).trim();
+    if (key) {
+      try {
+        cookies[key] = decodeURIComponent(val);
+      } catch {
+        cookies[key] = val;
+      }
+    }
+  });
+  return cookies;
+}
+
+/**
  * Returns the authentication secret for token signing and verification.
  * Fails safely in production if neither AUTH_SECRET nor JWT_SECRET is configured.
  */
 export function getAuthSecret(): string {
-  const secret = process.env.AUTH_SECRET || process.env.JWT_SECRET;
+  const secret = process.env.SESSION_SECRET || process.env.AUTH_SECRET || process.env.JWT_SECRET;
   if (!secret) {
     if (process.env.NODE_ENV === 'production') {
       throw new Error('FATAL: In production mode, AUTH_SECRET or JWT_SECRET must be configured.');
@@ -49,8 +74,8 @@ export function isDevDemoAuthEnabled(): boolean {
 // Deterministic fallback dev user for explicitly enabled local DX demo mode
 export const DEFAULT_DEV_USER: AuthUser = {
   id: 'usr_dev_reviewer_01',
-  role: 'reviewer',
-  email: 'reviewer@leadsync.internal',
+  role: 'owner',
+  email: 'owner@leadsync.internal',
 };
 
 /**
@@ -124,51 +149,159 @@ export function verifyToken(token: string): AuthUser | null {
 }
 
 /**
- * Middleware that extracts credentials from Authorization: Bearer or x-api-key header.
+ * CSRF protection middleware for state-changing requests.
+ * Rejects requests with mismatched Origin/Referer headers.
  */
-export function authenticate(req: Request, _res: Response, next: NextFunction): void {
-  const authHeader = req.headers.authorization;
-  const apiKey = req.headers['x-api-key'] as string | undefined;
-
-  // 1. Check API Key
-  if (apiKey && ADMIN_API_KEY && apiKey === ADMIN_API_KEY) {
-    req.user = { id: 'admin_apikey_user', role: 'admin' };
-    next();
-    return;
+export function verifyCsrf(req: Request, res: Response, next: NextFunction): void {
+  // Safe methods do not mutate state
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    return next();
   }
 
-  // 2. Check Bearer token
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.slice(7).trim();
-    if (token) {
-      const verified = verifyToken(token);
-      if (verified) {
-        req.user = verified;
-      }
-      // If a Bearer token was provided, it must be genuinely valid.
-      // Do not fall back to dev demo user if an invalid/placeholder token was provided.
-      next();
-      return;
+  const originHeader = req.headers.origin;
+  const refererHeader = req.headers.referer;
+  let requestOrigin: string | undefined = originHeader;
+
+  if (!requestOrigin && refererHeader) {
+    try {
+      requestOrigin = new URL(refererHeader).origin;
+    } catch {
+      // Invalid referer URL format
     }
   }
 
-  // 3. Allow anonymous dev fallback ONLY if explicitly opted in via isDevDemoAuthEnabled()
-  // and no credentials were supplied. Never allowed in production.
-  if (isDevDemoAuthEnabled() && !authHeader && !apiKey) {
-    req.user = DEFAULT_DEV_USER;
+  // If no Origin or Referer header was provided (e.g. direct server-to-server, curl, tests), proceed
+  if (!requestOrigin) {
+    return next();
+  }
+
+  const allowedOrigins = [
+    process.env.APP_ORIGIN,
+    process.env.FRONTEND_URL,
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'https://groweasy-frontend.vercel.app',
+  ].filter(Boolean) as string[];
+
+  const isAllowed = allowedOrigins.some((allowed) => {
+    try {
+      return new URL(allowed).origin === requestOrigin;
+    } catch {
+      return allowed === requestOrigin;
+    }
+  });
+
+  if (!isAllowed) {
+    res.status(403).json({ error: 'CSRF verification failed: Origin not allowed' });
+    return;
   }
 
   next();
 }
 
 /**
- * Middleware enforcing authentication. Rejects with 401 if not authenticated.
+ * Middleware that extracts credentials from:
+ * 1. Session cookie (leadsync_session) -> resolves owner from database
+ * 2. API Key header (x-api-key)
+ * 3. Authorization Bearer token header
+ * 4. Development demo fallback if explicitly enabled
+ */
+export async function authenticate(req: Request, _res: Response, next: NextFunction): Promise<void> {
+  try {
+    // 1. Session Cookie lookup
+    const cookies = parseCookies(req.headers.cookie);
+    const sessionToken = cookies['leadsync_session'];
+
+    if (sessionToken) {
+      try {
+        const session = await prisma.session.findUnique({
+          where: { sessionToken },
+        });
+
+        if (session && new Date() <= session.expiresAt) {
+          const ownerEmail = process.env.OWNER_GOOGLE_EMAIL;
+          const ownerSub = process.env.OWNER_GOOGLE_SUB;
+          const emailMatches = !ownerEmail || session.email.toLowerCase() === ownerEmail.toLowerCase();
+          const subMatches = !ownerSub || session.googleSub === ownerSub;
+
+          if (emailMatches && subMatches) {
+            req.user = {
+              id: session.googleSub,
+              role: 'owner',
+              email: session.email,
+              name: session.name,
+              picture: session.picture,
+            };
+            next();
+            return;
+          }
+        }
+      } catch {
+        // If DB query fails, continue to check headers
+      }
+    }
+
+    const authHeader = req.headers.authorization;
+    const apiKey = req.headers['x-api-key'] as string | undefined;
+
+    // 2. Check API Key
+    if (apiKey && ADMIN_API_KEY && apiKey === ADMIN_API_KEY) {
+      req.user = { id: 'admin_apikey_user', role: 'admin' };
+      next();
+      return;
+    }
+
+    // 3. Check Bearer token
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.slice(7).trim();
+      if (token) {
+        const verified = verifyToken(token);
+        if (verified) {
+          req.user = verified;
+        }
+        next();
+        return;
+      }
+    }
+
+    // 4. Dev demo fallback ONLY if explicitly enabled
+    if (isDevDemoAuthEnabled() && !authHeader && !apiKey && !sessionToken) {
+      req.user = DEFAULT_DEV_USER;
+    }
+  } catch {
+    // Continue unauthenticated on unexpected error
+  }
+
+  next();
+}
+
+/**
+ * Middleware enforcing authentication. Rejects with 401 if unauthenticated.
  */
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
   if (!req.user) {
-    res.status(401).json({ error: 'Authentication required. Please provide a valid Bearer token or API key.' });
+    res.status(401).json({ error: 'Authentication required. Please sign in with Google.' });
     return;
   }
+  next();
+}
+
+/**
+ * Middleware enforcing Single-Owner access.
+ * Returns 401 if unauthenticated, 403 if authenticated identity lacks owner privileges.
+ */
+export function requireOwner(req: Request, res: Response, next: NextFunction): void {
+  if (!req.user) {
+    res.status(401).json({ error: 'Authentication required. Please sign in with Google.' });
+    return;
+  }
+
+  const isAuthorized = req.user.role === 'owner' || req.user.role === 'admin' || req.user.role === 'reviewer';
+  if (!isAuthorized) {
+    res.status(403).json({ error: 'Forbidden: Owner privileges required.' });
+    return;
+  }
+
   next();
 }
 
@@ -190,18 +323,16 @@ export function requireRole(...allowedRoles: UserRole[]) {
 }
 
 /**
- * Authorizes access to a pending import based on ownership and role.
- * Admins can access all imports.
- * Reviewers can access unassigned imports or imports assigned to them.
- * Users can only access imports they created.
+ * Authorizes access to a pending import based on ownership.
+ * Owner or administrative roles can access all imports.
+ * Legacy unassigned imports or imports matching user id are also accessible.
  */
 export function isAuthorizedForPendingImport(
   user: AuthUser,
   pendingImport: { userId?: string | null }
 ): boolean {
-  if (user.role === 'admin') return true;
-  if (!pendingImport.userId) return true; // Legacy or unassigned
+  if (user.role === 'owner' || user.role === 'admin' || user.role === 'reviewer') return true;
+  if (!pendingImport.userId) return true;
   if (pendingImport.userId === user.id) return true;
-  if (user.role === 'reviewer') return true; // Reviewers are authorized to review imports
   return false;
 }

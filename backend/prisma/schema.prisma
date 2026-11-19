@@ -91,3 +91,18 @@ model PendingImport {
   @@index([userId])
   @@map("pending_imports")
 }
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  googleSub    String
+  email        String
+  name         String?
+  picture      String?
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@index([sessionToken])
+  @@index([expiresAt])
+  @@map("sessions")
+}

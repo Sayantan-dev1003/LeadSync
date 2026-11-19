@@ -1,11 +1,11 @@
 import { Router, Request, Response } from 'express';
 import { prisma } from '../lib/prisma';
-import { requireAuth } from '../middleware/auth.middleware';
+import { requireOwner } from '../middleware/auth.middleware';
 import { sanitizeLogMessage } from '../lib/sanitizer';
 
 const router = Router();
 
-router.get('/', requireAuth, async (_req: Request, res: Response) => {
+router.get('/', requireOwner, async (_req: Request, res: Response) => {
   try {
     const leads = await prisma.lead.findMany({
       orderBy: { importedAt: 'desc' },
