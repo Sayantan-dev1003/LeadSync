@@ -55,10 +55,11 @@ CSV Upload ➔ Gemini AI Extraction ➔ Strict Zod Validation ➔ Staging (pendi
 ┌────────────────────────────────────────────────────────────────────────────────────┼───┐
 │                           Backend (Express + TypeScript)                           │   │
 │                                                                                    │   │
-│  ┌───────────────────────┐   ┌──────────────────────────┐   ┌───────────────────┐  │   │
-│  │ Phase A: Extract      │ ➔ │ Import Orchestrator      │ ➔ │ Database Staging  │  │   │
-│  │ (multer + csv-parse)  │   │ (Gemini Batch + Backoff) │   │ (pending_imports) │  │   │
-│  └───────────────────────┘   └──────────────────────────┘   └───────────────────┘  │   │
+│  ┌───────────────────────┐   ┌──────────────────────────────────────────────┐   ┌──┴────────────────┐  │
+│  │ Phase A: Extract      │ ➔ │ Import Orchestrator                          │ ➔ │ Database Staging  │  │
+│  │ (multer + csv-parse)  │   │ 1. Stage A: Tool Orchestrator (Function Call)│   │ (pending_imports) │  │
+│  │                       │   │ 2. Stage B: Batch Extractor + Backoff Retry  │   │                   │  │
+│  └───────────────────────┘   └──────────────────────────────────────────────┘   └───────────────────┘  │
 │                                                                                    │   │
 │  ┌──────────────────────────────────────────────────────────────────────────────┐  │   │
 │  │ Phase B: POST /api/imports/:id/approve (Protected by Single-Owner Session)   │  │   │
@@ -446,7 +447,28 @@ CSV Upload (e.g. messy_manual_spreadsheet.csv)
 
 ---
 
-### 6. Local Setup & Manual Testing with Gemini API
+### 6. Observability, Telemetry & PII-Safe Logging
+
+LeadSync integrates structured telemetry tracking ([`toolObservability.service.ts`](backend/src/services/toolObservability.service.ts)) to observe and monitor Gemini function-calling behavior in real time:
+
+- **Metrics Collected**:
+  - `totalModelRequests`: Number of HTTP exchanges with Gemini.
+  - `conversationRounds`: Number of turn cycles completed.
+  - `toolCallsRequested` / `toolCallsExecuted`: Counts and names of dispatched tools.
+  - `toolCallsFailed`: Tools that rejected invalid arguments or exceeded limits.
+  - `toolExecutionTimesMs`: Exact execution latency per tool call.
+  - `tokenUsage`: Prompt tokens, candidates tokens, and total tokens tracked via Gemini's `usageMetadata`.
+  - `fallbackOccurred`: Boolean flag and sanitized reason code indicating whether the pipeline completed via tool-planned mappings or fell back to heuristic batch extraction.
+- **Zero-PII Defensive Logging**:
+  - All log entries pass through regex sanitizers ([`sanitizer.ts`](backend/src/lib/sanitizer.ts)) that redact customer emails, phone numbers, auth tokens, database credentials, and raw lead data.
+  - Observability logs output aggregated execution metrics without leaking row content:
+    ```text
+    [ToolObservability] Completed in 842ms | Requests: 3 | Rounds: 3 | Tools Called: 2 (retrieve_mapping_examples, validate_mapping) | Executed: 2 | Failed: 0 | Fallback: false
+    ```
+
+---
+
+### 7. Local Setup & Manual Testing with Gemini API
 
 1. Configure your `.env` in `backend/`:
    ```env
@@ -468,7 +490,7 @@ CSV Upload (e.g. messy_manual_spreadsheet.csv)
 
 ---
 
-### 7. Controlled SDK Migration Roadmap (`@google/generative-ai` ➔ `@google/genai`)
+### 8. Controlled SDK Migration Roadmap (`@google/generative-ai` ➔ `@google/genai`)
 
 The current implementation leverages Google's native function calling via `@google/generative-ai` (with genuine `FunctionDeclaration` OpenAPI specifications and multi-turn `functionResponse` message cycles). Google has introduced `@google/genai` (The Google Gen AI SDK) as the unified successor SDK. To ensure zero downtime, guaranteed offline CI builds, and full backward compatibility, the migration follows this controlled 4-stage transition:
 
