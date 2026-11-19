@@ -92,16 +92,19 @@ function invokeApp(
     query?: Record<string, string>;
     body?: any;
   }
-): Promise<{ statusCode: number; headers: Record<string, string>; body: any }> {
+): Promise<{ statusCode: number; headers: Record<string, any>; body: any }> {
   return new Promise((resolve) => {
-    const resHeaders: Record<string, string> = {};
+    const resHeaders: Record<string, any> = {};
     let statusCode = 200;
     let responseBody: any = null;
 
     const res: any = {
       statusCode: 200,
-      setHeader: (name: string, value: string) => {
+      setHeader: (name: string, value: string | string[]) => {
         resHeaders[name.toLowerCase()] = value;
+      },
+      getHeader: (name: string) => {
+        return resHeaders[name.toLowerCase()];
       },
       status: (code: number) => {
         statusCode = code;
@@ -131,6 +134,16 @@ function invokeApp(
       resolve({ statusCode, headers: resHeaders, body: responseBody });
     });
   });
+}
+
+function makeOAuthCookie(state: string, nonce: string, codeVerifier: string, exp?: number): string {
+  const signed = signOAuthCookiePayload({
+    state,
+    nonce,
+    codeVerifier,
+    exp: exp ?? Date.now() + 600000,
+  });
+  return `leadsync_oauth_state=${signed}`;
 }
 
 describe('Google Authentication, PKCE, Nonce & Session Management', () => {
@@ -215,6 +228,45 @@ describe('Google Authentication, PKCE, Nonce & Session Management', () => {
       expect(res.headers['location']).toBe('http://localhost:3000/?auth_error=invalid_state');
     });
 
+    it('rejects callback if browser matching state cookie is missing even if state exists in DB or memory', async () => {
+      const state = 'cookie-missing-state';
+      oauthStateMap.set(state, { nonce: 'nonce-1', codeVerifier: 'verifier-1', createdAt: Date.now() });
+      mockOAuthStates.push({
+        id: 'db_state_1',
+        state,
+        nonce: 'nonce-1',
+        codeVerifier: 'verifier-1',
+        expiresAt: new Date(Date.now() + 60000),
+      });
+
+      // No leadsync_oauth_state cookie sent by browser!
+      const res = await invokeApp((req, res) => authRouter(req, res, () => {}), {
+        method: 'GET',
+        url: '/google/callback',
+        query: { code: 'some-code', state },
+        headers: {},
+      });
+
+      expect(res.statusCode).toBe(302);
+      expect(res.headers['location']).toBe('http://localhost:3000/?auth_error=invalid_state');
+    });
+
+    it('rejects callback if browser state cookie does not match query state parameter', async () => {
+      const stateInParam = 'state-param-xyz';
+      const stateInCookie = 'state-cookie-different';
+      const cookieHeader = makeOAuthCookie(stateInCookie, 'nonce-1', 'verifier-1');
+
+      const res = await invokeApp((req, res) => authRouter(req, res, () => {}), {
+        method: 'GET',
+        url: '/google/callback',
+        query: { code: 'some-code', state: stateInParam },
+        headers: { cookie: cookieHeader },
+      });
+
+      expect(res.statusCode).toBe(302);
+      expect(res.headers['location']).toBe('http://localhost:3000/?auth_error=invalid_state');
+    });
+
     it('rejects callback with expired state', async () => {
       const state = 'expired-state-token';
       oauthStateMap.set(state, {
@@ -227,6 +279,7 @@ describe('Google Authentication, PKCE, Nonce & Session Management', () => {
         method: 'GET',
         url: '/google/callback',
         query: { code: 'some-code', state },
+        headers: { cookie: makeOAuthCookie(state, 'test-nonce', 'test-verifier', Date.now() - 1000) },
       });
 
       expect(res.statusCode).toBe(302);
@@ -256,6 +309,7 @@ describe('Google Authentication, PKCE, Nonce & Session Management', () => {
         method: 'GET',
         url: '/google/callback',
         query: { code: 'valid-code', state },
+        headers: { cookie: makeOAuthCookie(state, 'test-nonce', 'test-verifier') },
       });
 
       expect(res.statusCode).toBe(302);
@@ -285,6 +339,7 @@ describe('Google Authentication, PKCE, Nonce & Session Management', () => {
         method: 'GET',
         url: '/google/callback',
         query: { code: 'valid-code', state },
+        headers: { cookie: makeOAuthCookie(state, 'test-nonce', 'test-verifier') },
       });
 
       expect(res.statusCode).toBe(302);
@@ -314,6 +369,7 @@ describe('Google Authentication, PKCE, Nonce & Session Management', () => {
         method: 'GET',
         url: '/google/callback',
         query: { code: 'valid-code', state },
+        headers: { cookie: makeOAuthCookie(state, 'correct-nonce', 'test-verifier') },
       });
 
       expect(res.statusCode).toBe(302);
@@ -347,6 +403,7 @@ describe('Google Authentication, PKCE, Nonce & Session Management', () => {
         method: 'GET',
         url: '/google/callback',
         query: { code: 'auth-code-123', state },
+        headers: { cookie: makeOAuthCookie(state, 'test-nonce', 'expected-pkce-code-verifier-string') },
       });
 
       expect(mockGetToken).toHaveBeenCalledWith({
@@ -398,6 +455,43 @@ describe('Google Authentication, PKCE, Nonce & Session Management', () => {
       expect(mockSessions[0].email).toBe('owner@example.com');
     });
 
+    it('appends both Set-Cookie headers on successful callback (clearing state cookie and setting session cookie)', async () => {
+      const state = 'cookie-append-state';
+      const nonce = 'cookie-append-nonce';
+      const codeVerifier = 'cookie-append-verifier';
+
+      mockGetToken.mockResolvedValue({
+        tokens: { id_token: 'fake-id-token' },
+      });
+
+      mockVerifyIdToken.mockResolvedValue({
+        getPayload: () => ({
+          iss: 'https://accounts.google.com',
+          sub: 'google-sub-12345',
+          email: 'owner@example.com',
+          email_verified: true,
+          nonce,
+        }),
+      });
+
+      const res = await invokeApp((req, res) => authRouter(req, res, () => {}), {
+        method: 'GET',
+        url: '/google/callback',
+        query: { code: 'code-xyz', state },
+        headers: { cookie: makeOAuthCookie(state, nonce, codeVerifier) },
+      });
+
+      expect(res.statusCode).toBe(302);
+      expect(res.headers['location']).toBe('http://localhost:3000/');
+
+      // Verify BOTH cookies are preserved in Set-Cookie array
+      const setCookies = res.headers['set-cookie'];
+      expect(Array.isArray(setCookies)).toBe(true);
+      expect(setCookies).toHaveLength(2);
+      expect(setCookies[0]).toMatch(/leadsync_oauth_state=;.*Max-Age=0/);
+      expect(setCookies[1]).toMatch(/leadsync_session=/);
+    });
+
     it('rejects unauthorized Google accounts and creates zero sessions', async () => {
       const state = 'valid-state';
       oauthStateMap.set(state, { nonce: 'test-nonce', codeVerifier: 'verifier', createdAt: Date.now() });
@@ -420,6 +514,7 @@ describe('Google Authentication, PKCE, Nonce & Session Management', () => {
         method: 'GET',
         url: '/google/callback',
         query: { code: 'valid-code', state },
+        headers: { cookie: makeOAuthCookie(state, 'test-nonce', 'verifier') },
       });
 
       expect(res.statusCode).toBe(302);
@@ -484,6 +579,29 @@ describe('Google Authentication, PKCE, Nonce & Session Management', () => {
           picture: 'https://lh3.googleusercontent.com/avatar.jpg',
         },
       });
+    });
+
+    it('strictly fails closed when OWNER_GOOGLE_EMAIL is absent even with valid session', async () => {
+      delete process.env.OWNER_GOOGLE_EMAIL;
+
+      mockSessions.push({
+        id: 'sess_1',
+        sessionToken: 'valid-token',
+        googleSub: 'google-sub-12345',
+        email: 'owner@example.com',
+        name: 'LeadSync Owner',
+        picture: null,
+        expiresAt: new Date(Date.now() + 86400000),
+      });
+
+      const res = await invokeApp((req, res) => authRouter(req, res, () => {}), {
+        method: 'GET',
+        url: '/me',
+        headers: { cookie: 'leadsync_session=valid-token' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toEqual({ authenticated: false });
     });
   });
 
@@ -567,6 +685,33 @@ describe('Google Authentication, PKCE, Nonce & Session Management', () => {
 
       expect(res.statusCode).toBe(200);
       expect(res.body).toHaveProperty('leads');
+    });
+
+    it('strictly fails closed in authenticate middleware when OWNER_GOOGLE_EMAIL is absent', async () => {
+      delete process.env.OWNER_GOOGLE_EMAIL;
+
+      mockSessions.push({
+        id: 'sess_owner_no_env',
+        sessionToken: 'token-no-env-check',
+        googleSub: 'google-sub-12345',
+        email: 'owner@example.com',
+        expiresAt: new Date(Date.now() + 86400000),
+      });
+
+      const runner = async (req: Request, res: Response) => {
+        await authenticate(req, res, () => {
+          leadsRouter(req, res, () => {});
+        });
+      };
+
+      const res = await invokeApp(runner, {
+        method: 'GET',
+        url: '/',
+        headers: { cookie: 'leadsync_session=token-no-env-check' },
+      });
+
+      expect(res.statusCode).toBe(401);
+      expect(res.body.error).toMatch(/Authentication required/i);
     });
   });
 });

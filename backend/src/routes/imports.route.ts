@@ -50,17 +50,23 @@ router.get('/pending/:pendingImportId', requireAuth, async (req: Request, res: R
     const isExpired = pending.status === 'EXPIRED' || new Date() > new Date(pending.expiresAt);
     let currentStatus = pending.status;
 
-    if (isExpired && pending.status === 'PENDING') {
+    if (isExpired) {
       currentStatus = 'EXPIRED';
-      await prisma.pendingImport.updateMany({
-        where: { id: pendingImportId, status: 'PENDING' },
-        data: {
-          status: 'EXPIRED',
-          records: [],
-          skipped: [],
-          failed: [],
-        },
-      });
+      if (pending.status === 'PENDING') {
+        await prisma.pendingImport.updateMany({
+          where: { id: pendingImportId, status: 'PENDING' },
+          data: {
+            status: 'EXPIRED',
+            records: [],
+            skipped: [],
+            failed: [],
+          },
+        });
+      }
+      // Purge/clear in-memory records to match purged database state and prevent PII leakage
+      pending.records = [];
+      pending.skipped = [];
+      pending.failed = [];
     }
 
     const records = Array.isArray(pending.records) ? (pending.records as unknown as CRMRecord[]) : [];

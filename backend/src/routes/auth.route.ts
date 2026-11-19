@@ -118,6 +118,20 @@ export function verifyOAuthCookiePayload(cookieVal: string): {
 }
 
 /**
+ * Appends a Set-Cookie header to the response, preserving existing Set-Cookie headers.
+ */
+export function appendSetCookie(res: Response, cookieValue: string): void {
+  const current = typeof res.getHeader === 'function' ? res.getHeader('Set-Cookie') : undefined;
+  if (!current) {
+    res.setHeader('Set-Cookie', cookieValue);
+  } else if (Array.isArray(current)) {
+    res.setHeader('Set-Cookie', [...current, cookieValue]);
+  } else {
+    res.setHeader('Set-Cookie', [String(current), cookieValue]);
+  }
+}
+
+/**
  * Saves OAuth state durably across database, signed HttpOnly cookie, and in-memory cache.
  */
 export async function persistOAuthState(
@@ -152,7 +166,7 @@ export async function persistOAuthState(
   if (isProduction) {
     cookieHeaders.push('Secure');
   }
-  res.setHeader('Set-Cookie', cookieHeaders.join('; '));
+  appendSetCookie(res, cookieHeaders.join('; '));
 
   // 3. Database persistence (if DB is reachable)
   try {
@@ -171,13 +185,14 @@ export async function persistOAuthState(
 
 /**
  * Retrieves and atomically consumes the OAuth state, preventing replay attacks.
+ * Strictly requires browser-bound state verification via the matching signed HttpOnly cookie.
  */
 export async function consumeOAuthState(
   req: Request,
   res: Response,
   state: string
 ): Promise<{ nonce: string; codeVerifier: string } | 'expired' | null> {
-  // Clear the OAuth state cookie immediately to prevent replay
+  // Clear the OAuth state cookie immediately to prevent replay, preserving other cookies
   const isProduction = process.env.NODE_ENV === 'production';
   const clearCookieParts = [
     'leadsync_oauth_state=',
@@ -189,52 +204,32 @@ export async function consumeOAuthState(
   if (isProduction) {
     clearCookieParts.push('Secure');
   }
-  res.setHeader('Set-Cookie', clearCookieParts.join('; '));
+  appendSetCookie(res, clearCookieParts.join('; '));
 
-  // 1. Try reading from signed HttpOnly cookie
+  // 1. Mandatory browser-bound OAuth state verification via signed HttpOnly cookie.
+  // Rejects requests without the matching browser state cookie to prevent CSRF / session injection.
   const cookies = parseCookies(req.headers.cookie);
   const cookieVal = cookies['leadsync_oauth_state'];
-  if (cookieVal) {
-    const verified = verifyOAuthCookiePayload(cookieVal);
-    if (verified && verified.state === state) {
-      // Also delete from DB & memory
-      oauthStateMap.delete(state);
-      try {
-        await prisma.oAuthState.deleteMany({ where: { state } }).catch(() => {});
-      } catch {}
-
-      if (Date.now() > verified.exp) {
-        return 'expired';
-      }
-      return { nonce: verified.nonce, codeVerifier: verified.codeVerifier };
-    }
+  if (!cookieVal) {
+    return null;
   }
 
-  // 2. Try reading from Database
-  try {
-    const dbEntry = await prisma.oAuthState.findUnique({ where: { state } });
-    if (dbEntry) {
-      await prisma.oAuthState.deleteMany({ where: { state } }).catch(() => {});
-      oauthStateMap.delete(state);
+  const verified = verifyOAuthCookiePayload(cookieVal);
+  if (!verified || verified.state !== state) {
+    return null;
+  }
 
-      if (Date.now() > dbEntry.expiresAt.getTime()) {
-        return 'expired';
-      }
-      return { nonce: dbEntry.nonce, codeVerifier: dbEntry.codeVerifier };
-    }
+  // Atomically delete from memory and database to prevent replay attacks
+  oauthStateMap.delete(state);
+  try {
+    await prisma.oAuthState.deleteMany({ where: { state } }).catch(() => {});
   } catch {}
 
-  // 3. Try reading from memory store
-  const memEntry = oauthStateMap.get(state);
-  if (memEntry) {
-    oauthStateMap.delete(state);
-    if (Date.now() - memEntry.createdAt > STATE_TTL_MS) {
-      return 'expired';
-    }
-    return { nonce: memEntry.nonce, codeVerifier: memEntry.codeVerifier };
+  if (Date.now() > verified.exp) {
+    return 'expired';
   }
 
-  return null;
+  return { nonce: verified.nonce, codeVerifier: verified.codeVerifier };
 }
 
 // --- Routes ---
@@ -400,7 +395,7 @@ router.get('/google/callback', async (req: Request, res: Response): Promise<void
       },
     });
 
-    // Set session cookie
+    // Set session cookie using appendSetCookie so the state-clearing cookie is preserved
     const isProduction = process.env.NODE_ENV === 'production';
     const cookieParts = [
       `leadsync_session=${sessionToken}`,
@@ -413,7 +408,7 @@ router.get('/google/callback', async (req: Request, res: Response): Promise<void
       cookieParts.push('Secure');
     }
 
-    res.setHeader('Set-Cookie', cookieParts.join('; '));
+    appendSetCookie(res, cookieParts.join('; '));
     res.redirect(`${appOrigin}/`);
   } catch (err) {
     console.error('Google OAuth callback error:', err instanceof Error ? err.message : err);
@@ -424,6 +419,7 @@ router.get('/google/callback', async (req: Request, res: Response): Promise<void
 /**
  * GET /api/auth/me
  * Returns the current user's session info, or { authenticated: false }.
+ * Strictly fails closed if OWNER_GOOGLE_EMAIL is not configured.
  */
 router.get('/me', async (req: Request, res: Response): Promise<void> => {
   try {
@@ -447,13 +443,17 @@ router.get('/me', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    // Verify against configured owner email/sub
-    const ownerEmail = process.env.OWNER_GOOGLE_EMAIL;
-    const ownerSub = process.env.OWNER_GOOGLE_SUB;
-    if (ownerEmail && session.email.toLowerCase() !== ownerEmail.toLowerCase()) {
+    // Verify against configured owner email/sub - strictly fail closed if OWNER_GOOGLE_EMAIL is absent
+    const ownerEmail = process.env.OWNER_GOOGLE_EMAIL?.trim();
+    if (!ownerEmail) {
       res.json({ authenticated: false });
       return;
     }
+    if (session.email.toLowerCase() !== ownerEmail.toLowerCase()) {
+      res.json({ authenticated: false });
+      return;
+    }
+    const ownerSub = process.env.OWNER_GOOGLE_SUB?.trim();
     if (ownerSub && session.googleSub !== ownerSub) {
       res.json({ authenticated: false });
       return;
@@ -498,7 +498,7 @@ router.post('/logout', async (req: Request, res: Response): Promise<void> => {
       cookieParts.push('Secure');
     }
 
-    res.setHeader('Set-Cookie', cookieParts.join('; '));
+    appendSetCookie(res, cookieParts.join('; '));
     res.json({ success: true });
   } catch (err) {
     console.error('Logout error:', err instanceof Error ? err.message : err);

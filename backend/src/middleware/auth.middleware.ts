@@ -108,9 +108,14 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
         });
 
         if (session && new Date() <= session.expiresAt) {
-          const ownerEmail = process.env.OWNER_GOOGLE_EMAIL;
-          const ownerSub = process.env.OWNER_GOOGLE_SUB;
-          const emailMatches = !ownerEmail || session.email.toLowerCase() === ownerEmail.toLowerCase();
+          const ownerEmail = process.env.OWNER_GOOGLE_EMAIL?.trim();
+          // Strictly fail closed if OWNER_GOOGLE_EMAIL is not configured
+          if (!ownerEmail) {
+            return next();
+          }
+
+          const emailMatches = session.email.toLowerCase() === ownerEmail.toLowerCase();
+          const ownerSub = process.env.OWNER_GOOGLE_SUB?.trim();
           const subMatches = !ownerSub || session.googleSub === ownerSub;
 
           if (emailMatches && subMatches) {

@@ -176,9 +176,12 @@ function invokeRouter(
         finish(this.statusCode, data);
         return this;
       },
-      setHeader(name: string, value: string) {
+      setHeader(name: string, value: string | string[]) {
         this.headers[name] = value;
         return this;
+      },
+      getHeader(name: string) {
+        return this.headers[name] || this.headers[name.toLowerCase()];
       },
       flushHeaders: jest.fn(),
       write(chunk: any) {
@@ -212,6 +215,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   process.env = { ...initialEnv };
   process.env.NODE_ENV = 'test';
+  process.env.OWNER_GOOGLE_EMAIL = 'owner@example.com';
   delete process.env.ALLOW_DEV_ANONYMOUS;
   delete process.env.ENABLE_DEV_DEMO_AUTH;
 });
@@ -412,6 +416,37 @@ describe('Phase B: Human approval and commit', () => {
     expect(body.error).toMatch(/expired/i);
     expect(mockPrisma.$transaction).not.toHaveBeenCalled();
     expect(mockPrisma.import.create).not.toHaveBeenCalled();
+  });
+
+  it('returns cleared records (empty arrays and 0 counts) when an expired pending import is retrieved', async () => {
+    const expiredPending = {
+      id: 'pending_expired_records',
+      userId: 'test_user_1',
+      filename: 'sample.csv',
+      totalRows: 1,
+      status: 'PENDING',
+      records: [sampleValidRecord],
+      skipped: [sampleSkippedRow],
+      failed: [],
+      expiresAt: new Date(Date.now() - 3600000), // expired 1 hour ago
+      committedImportId: null,
+    };
+
+    mockPrisma.pendingImport.findUnique.mockResolvedValue(expiredPending);
+
+    const { statusCode, body } = await invokeRouter(importsRouter, {
+      method: 'GET',
+      url: '/pending/pending_expired_records',
+      headers: { cookie: 'leadsync_session=owner_session_token' },
+    });
+
+    expect(statusCode).toBe(200);
+    expect(body.pendingImport.status).toBe('EXPIRED');
+    expect(body.pendingImport.records).toEqual([]);
+    expect(body.pendingImport.skipped).toEqual([]);
+    expect(body.pendingImport.failed).toEqual([]);
+    expect(body.pendingImport.totalValid).toBe(0);
+    expect(body.pendingImport.totalSkipped).toBe(0);
   });
 
   it('rejects approval when the pending import was previously rejected', async () => {
@@ -1016,6 +1051,19 @@ describe('Phase D: Authentication Middleware & Integration', () => {
 
     expect(statusCode).toBe(200);
     expect(body.pendingImport.id).toBe('pending_session_ok');
+  });
+
+  it('strictly fails closed when OWNER_GOOGLE_EMAIL is absent even if a valid session exists', async () => {
+    delete process.env.OWNER_GOOGLE_EMAIL;
+
+    const { statusCode, body } = await invokeRouter(importsRouter, {
+      method: 'GET',
+      url: '/pending/some_id',
+      headers: { cookie: 'leadsync_session=owner_session_token' },
+    });
+
+    expect(statusCode).toBe(401);
+    expect(body.error).toMatch(/Authentication required/i);
   });
 });
 
