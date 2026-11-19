@@ -9,6 +9,7 @@ import {
 import { validateAIBatch } from './zodSchemas.service';
 import { shouldSkipRow } from './validators.service';
 import { sanitizeLogMessage } from '../lib/sanitizer';
+import type { ValidatedMappingPlan } from './geminiToolOrchestrator.service';
 
 const SYSTEM_PROMPT = `You are a data-mapping engine for a CRM system called GrowEasy. Your ONLY job is to receive raw CSV row objects with arbitrary, inconsistent, or messy column names and map each row's data onto a fixed CRM schema.
 
@@ -178,10 +179,27 @@ function parseAIResponseText(rawText: string): unknown {
  * Individual row validation failures are reported as failed rows without
  * causing the whole batch to be retried.
  */
-export async function extractBatch(rawRows: RawRow[]): Promise<BatchResult> {
+export async function extractBatch(
+  rawRows: RawRow[],
+  mappingPlan?: ValidatedMappingPlan | null
+): Promise<BatchResult> {
   const m = getModel();
 
-  const prompt = `Here are ${rawRows.length} CSV rows to map onto the CRM schema. Return a JSON array with exactly ${rawRows.length} objects.\n\nInput:\n${JSON.stringify(rawRows, null, 2)}`;
+  let mappingInstructions = '';
+  if (mappingPlan && mappingPlan.mappings.length > 0) {
+    const lines = mappingPlan.mappings
+      .filter((m) => m.target !== 'unmapped')
+      .map(
+        (m) =>
+          `- Source header "${m.source}" -> Map to CRM field "${m.target}"${m.reasoning ? ` (${m.reasoning})` : ''}`
+      )
+      .join('\n');
+    if (lines) {
+      mappingInstructions = `\n\n## VALIDATED COLUMN MAPPINGS (Determined via Gemini Function Calling):\nAlways follow these validated field mappings:\n${lines}\n`;
+    }
+  }
+
+  const prompt = `Here are ${rawRows.length} CSV rows to map onto the CRM schema. Return a JSON array with exactly ${rawRows.length} objects.${mappingInstructions}\n\nInput:\n${JSON.stringify(rawRows, null, 2)}`;
 
   const result = await m.generateContent(prompt);
   const responseText = result.response.text();

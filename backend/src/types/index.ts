@@ -21,6 +21,26 @@ export const DATA_SOURCE_VALUES = [
 
 export type DataSource = (typeof DATA_SOURCE_VALUES)[number];
 
+export const CRM_FIELDS = [
+  'created_at',
+  'name',
+  'email',
+  'country_code',
+  'mobile_without_country_code',
+  'company',
+  'city',
+  'state',
+  'country',
+  'lead_owner',
+  'crm_status',
+  'crm_note',
+  'data_source',
+  'possession_time',
+  'description',
+] as const;
+
+export type CRMField = (typeof CRM_FIELDS)[number];
+
 export interface CRMRecord {
   created_at: string | null;
   name: string | null;

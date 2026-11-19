@@ -1,6 +1,7 @@
 import pLimit from 'p-limit';
 import { chunkArray } from './csvParser.service';
 import { extractBatch, withRetry } from './aiExtractor.service';
+import { planMappingsWithTools, type ValidatedMappingPlan } from './geminiToolOrchestrator.service';
 import type { CRMRecord, FailedRow, RawRow, SkippedRow, SSEEvent } from '../types';
 import { sanitizeLogMessage } from '../lib/sanitizer';
 
@@ -10,17 +11,20 @@ export interface OrchestratorOptions {
   maxRetries?: number;
   filename?: string;
   importId?: string;
+  headers?: string[];
+  skipToolMapping?: boolean;
 }
 
 export type SSECallback = (event: SSEEvent) => void;
 
 /**
  * Orchestrates the full import pipeline:
- * 1. Chunks rows into batches
- * 2. Processes batches concurrently with rate limiting
- * 3. Retries failed batches with exponential backoff
- * 4. Streams progress events via callback
- * 5. Returns aggregated results
+ * 1. Executes Stage A: Genuine Gemini tool-calling mapping planning for distinct headers
+ * 2. Chunks rows into batches
+ * 3. Processes batches concurrently with rate limiting and validated mapping context
+ * 4. Retries failed batches with exponential backoff
+ * 5. Streams progress events via callback
+ * 6. Returns aggregated results
  *
  * Failed rows (AI/validation errors) are tracked separately from skipped rows
  * (deliberate skip because no contact info). This distinction is preserved in
@@ -30,11 +34,39 @@ export async function orchestrateImport(
   rows: RawRow[],
   onEvent: SSECallback,
   options: OrchestratorOptions = {}
-): Promise<{ records: CRMRecord[]; skipped: SkippedRow[]; failed: FailedRow[] }> {
+): Promise<{
+  records: CRMRecord[];
+  skipped: SkippedRow[];
+  failed: FailedRow[];
+  mappingPlan?: ValidatedMappingPlan | null;
+}> {
   const batchSize = options.batchSize ?? parseInt(process.env.BATCH_SIZE || '20', 10);
   const concurrency = options.concurrency ?? parseInt(process.env.BATCH_CONCURRENCY || '3', 10);
   const maxRetries = options.maxRetries ?? parseInt(process.env.BATCH_MAX_RETRIES || '3', 10);
 
+  // ---------------------------------------------------------------------------
+  // Stage A: Tool-orchestrated mapping planning (once per import)
+  // ---------------------------------------------------------------------------
+  const headers = options.headers ?? (rows.length > 0 ? Object.keys(rows[0]) : []);
+  let validatedMappingPlan: ValidatedMappingPlan | null = null;
+
+  if (headers.length > 0 && !options.skipToolMapping) {
+    try {
+      const { plan, fallbackOccurred } = await planMappingsWithTools(headers);
+      if (plan && !fallbackOccurred) {
+        validatedMappingPlan = plan;
+      }
+    } catch (toolErr) {
+      const safeMessage = sanitizeLogMessage(
+        toolErr instanceof Error ? toolErr.message : 'Unknown tool error'
+      );
+      console.warn(`[ImportOrchestrator] Tool mapping failed (${safeMessage}). Proceeding with heuristic extraction.`);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Stage B: Concurrent batch extraction using validatedMappingPlan
+  // ---------------------------------------------------------------------------
   const batches = chunkArray(rows, batchSize);
   const totalBatches = batches.length;
 
@@ -52,7 +84,10 @@ export async function orchestrateImport(
         let batchFailed: FailedRow[] = [];
 
         try {
-          const result = await withRetry(() => extractBatch(batch), maxRetries);
+          const result = await withRetry(
+            () => extractBatch(batch, validatedMappingPlan),
+            maxRetries
+          );
           batchRecords = result.records;
           batchSkipped = result.skipped;
           batchFailed = result.failed;
@@ -91,5 +126,10 @@ export async function orchestrateImport(
     allFailed.push(...batchFailed);
   });
 
-  return { records: allRecords, skipped: allSkipped, failed: allFailed };
+  return {
+    records: allRecords,
+    skipped: allSkipped,
+    failed: allFailed,
+    mappingPlan: validatedMappingPlan,
+  };
 }

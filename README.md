@@ -297,6 +297,177 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ---
 
+## 🤖 Gemini Function Calling & Tool-Orchestrated CRM Extraction
+
+LeadSync upgrades its AI mapping pipeline with genuine **Gemini Function Calling (Tool Use)**. Rather than relying solely on monolithic prompt engineering or simulated tool strings, Gemini dynamically requests backend tools, receives structured execution outputs, reasons over schema constraints, and validates proposed mappings before processing records.
+
+### 1. Conceptual Distinction
+
+| Technique | How LeadSync Uses It |
+|---|---|
+| **Prompt Engineering** | System instructions define the extraction rules, date normalization, and CRM domain context. |
+| **Structured Output** | Used in Stage B where Gemini outputs a strict JSON array conforming to the 15 CRM target fields. |
+| **Native Function Calling** | Model dynamically calls declared tools (`get_crm_schema`, `retrieve_mapping_examples`, `validate_mapping`), receives actual server tool responses, and reasons across multiple turns. |
+| **Deterministic Alias Lookup** | Tool 2 searches a curated, bounded alias dictionary using token matching (no hallucinated mappings). |
+| **Advanced RAG (Future)** | Vector databases, embeddings, and semantic indexers are deliberately omitted in this phase. |
+
+---
+
+### 2. Available Backend Tools
+
+| Tool Name | Parameters | Purpose & Guarantees |
+|---|---|---|
+| `get_crm_schema` | *None* | Returns the authoritative description of all 15 LeadSync CRM fields, expected data types, nullability, accepted enums (`CRM_STATUS_VALUES`, `DATA_SOURCE_VALUES`), and validation rules. Read-only, zero lead data access. |
+| `retrieve_mapping_examples` | `{ headers: string[] }` | Queries a curated dictionary of real-world CSV aliases (e.g., `Cust_Name` ➔ `name`, `Mob no` ➔ `mobile_without_country_code`). Returns bounded, high-confidence deterministic examples. Never accesses private customer records. |
+| `validate_mapping` | `{ mappings: [{ source, target }] }` | Server-side validator that rejects non-existent CRM target fields, detects missing source columns, flags conflicting mappings (multiple columns mapped to one scalar field), and checks contact coverage. |
+
+---
+
+### 3. Two-Stage Extraction Architecture
+
+```text
+CSV Upload (e.g. messy_manual_spreadsheet.csv)
+   │
+   ▼
+[Extract Distinct Headers once per import]
+   │
+   ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ Stage A: Gemini Function-Calling Mapping Planning                      │
+│                                                                        │
+│ 1. Model receives headers + 3 tool declarations (AUTO mode)            │
+│ 2. Gemini dynamically invokes tools (e.g. get_crm_schema)             │
+│ 3. Backend verifies tool name on allowlist, validates args with Zod    │
+│ 4. Backend executes tool and returns { functionResponse }              │
+│ 5. Gemini receives tool outputs and reasons over mappings             │
+│ 6. Gemini optionally calls retrieve_mapping_examples & validate_mapping│
+│ 7. Gemini returns final mapping plan JSON                              │
+│ 8. Server authoritatively validates mapping plan                       │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ Validated Mapping Plan
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ Stage B: Concurrent Batch Record Extraction                            │
+│                                                                        │
+│ - Batch size: 20 rows, Concurrency: 3 workers, Max retries: 3         │
+│ - Validated column mappings injected into extraction prompt            │
+│ - Strict Zod validation (AIExtractedRowSchema) on every row            │
+│ - Authoritative server-side skip rule: shouldSkipRow()                 │
+│ - Staged in PendingImport (status: PENDING)                           │
+│ - Streamed to frontend via Server-Sent Events (SSE)                   │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+           Human Review ➔ Explicit Owner Approval ➔ Atomic DB Commit
+```
+
+---
+
+### 4. Tool Execution Limits & Safety Boundaries
+
+- **Strict Allowlist**: Only explicitly registered tools (`get_crm_schema`, `retrieve_mapping_examples`, `validate_mapping`) can ever be dispatched. Unknown tool requests return structured errors without crashing.
+- **Zod Argument Validation**: Every tool's arguments are parsed and validated by strict Zod schemas before execution.
+- **Bounded Tool Calls**: Maximum **5 total tool calls** and maximum **3 conversation rounds** per mapping operation to prevent recursion and runaway API costs.
+- **Read-Only Guarantees**: None of the tools possess database mutation capabilities. Tools cannot approve imports, insert leads, update pending imports, or execute SQL.
+- **Prompt Injection Defense**: Source CSV column headers and values are encapsulated strictly as data parameters, never interpreted as system prompts or tool declarations.
+- **Timeouts & Safe Fallback**: If tool orchestration times out or encounters Gemini service unavailability, the system falls back to direct heuristic extraction under a documented policy and records `fallbackOccurred: true` in telemetry.
+
+---
+
+### 5. Example Real Tool-Call Trace
+
+```json
+[
+  {
+    "turn": 1,
+    "role": "model",
+    "call": {
+      "name": "retrieve_mapping_examples",
+      "args": { "headers": ["Cust_Name", "Mob_No", "Emal", "staus"] }
+    }
+  },
+  {
+    "turn": 1,
+    "role": "tool_response",
+    "response": {
+      "totalMatches": 4,
+      "examples": [
+        { "sourceHeader": "Cust_Name", "matchedAlias": "cust_name", "targetField": "name", "confidence": "high" },
+        { "sourceHeader": "Mob_No", "matchedAlias": "mob_no", "targetField": "mobile_without_country_code", "confidence": "high" },
+        { "sourceHeader": "Emal", "matchedAlias": "emal", "targetField": "email", "confidence": "high" },
+        { "sourceHeader": "staus", "matchedAlias": "staus", "targetField": "crm_status", "confidence": "high" }
+      ]
+    }
+  },
+  {
+    "turn": 2,
+    "role": "model",
+    "call": {
+      "name": "validate_mapping",
+      "args": {
+        "mappings": [
+          { "source": "Cust_Name", "target": "name" },
+          { "source": "Mob_No", "target": "mobile_without_country_code" },
+          { "source": "Emal", "target": "email" },
+          { "source": "staus", "target": "crm_status" }
+        ]
+      }
+    }
+  },
+  {
+    "turn": 2,
+    "role": "tool_response",
+    "response": {
+      "valid": true,
+      "errors": [],
+      "warnings": [],
+      "validatedMappings": [
+        { "source": "Cust_Name", "target": "name" },
+        { "source": "Mob_No", "target": "mobile_without_country_code" },
+        { "source": "Emal", "target": "email" },
+        { "source": "staus", "target": "crm_status" }
+      ]
+    }
+  },
+  {
+    "turn": 3,
+    "role": "model",
+    "finalOutput": {
+      "mappings": [
+        { "source": "Cust_Name", "target": "name", "reasoning": "Customer full name" },
+        { "source": "Mob_No", "target": "mobile_without_country_code", "reasoning": "Mobile phone" },
+        { "source": "Emal", "target": "email", "reasoning": "Primary email" },
+        { "source": "staus", "target": "crm_status", "reasoning": "Lead qualification status" }
+      ]
+    }
+  }
+]
+```
+
+---
+
+### 6. Local Setup & Manual Testing with Gemini API
+
+1. Configure your `.env` in `backend/`:
+   ```env
+   GEMINI_API_KEY="your-real-gemini-api-key"
+   GEMINI_MODEL="gemini-1.5-flash"
+   ```
+2. Start the backend:
+   ```bash
+   cd backend && npm run dev
+   ```
+3. Test with a **straightforward CSV** (`samples/google_ads_export.csv`):
+   - Notice: Model evaluates standard headers and completes with minimal or zero tool calls.
+4. Test with a **messy CSV** (`samples/messy_manual_spreadsheet.csv`):
+   - Notice: Model requests `retrieve_mapping_examples` and `validate_mapping`, resolves abbreviations like `Mob no` and `staus`, and produces validated CRM records.
+5. Inspect local tool observability summary in backend logs:
+   ```text
+   [ToolObservability] Completed in 842ms | Requests: 3 | Rounds: 3 | Tools Called: 2 (retrieve_mapping_examples, validate_mapping) | Executed: 2 | Failed: 0 | Fallback: false
+   ```
+
+---
+
 ## 🐳 Docker Deployment
 
 The application includes multi-stage Dockerfiles and `docker-compose.yml`:

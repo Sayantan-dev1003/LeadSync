@@ -111,7 +111,7 @@ router.post('/', requireAuth, upload.single('file'), async (req: Request, res: R
 
   try {
     // 1. Parse CSV
-    const { rows, warnings } = parseCSVBuffer(req.file.buffer);
+    const { rows, headers, warnings } = parseCSVBuffer(req.file.buffer);
 
     if (warnings.length > 0) {
       console.info('Parse warnings for file upload');
@@ -123,15 +123,19 @@ router.post('/', requireAuth, upload.single('file'), async (req: Request, res: R
     }
 
     // 2. Run AI extraction with streaming progress
-    const { records, skipped, failed } = await orchestrateImport(rows, (event) => {
-      if (!canWriteToStream()) return;
-      if (event.type === 'progress') {
-        allRecords.push(...event.batchRecords);
-        allSkipped.push(...event.batchSkipped);
-        allFailed.push(...event.batchFailed);
-      }
-      sendEvent(event);
-    });
+    const { records, skipped, failed } = await orchestrateImport(
+      rows,
+      (event) => {
+        if (!canWriteToStream()) return;
+        if (event.type === 'progress') {
+          allRecords.push(...event.batchRecords);
+          allSkipped.push(...event.batchSkipped);
+          allFailed.push(...event.batchFailed);
+        }
+        sendEvent(event);
+      },
+      { headers, filename }
+    );
 
     if (!canWriteToStream()) {
       return;
