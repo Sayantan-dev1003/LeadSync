@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 import { performance } from 'perf_hooks';
 import {
   type BatchResult,
@@ -109,26 +109,15 @@ Return EXACTLY a JSON array of objects, one per input row, in the same order as 
 
 CRITICAL: Return ONLY the JSON array. No markdown. No text before or after. No \`\`\`json fences.`;
 
-type ModelType = ReturnType<GoogleGenerativeAI['getGenerativeModel']>;
+let genAI: GoogleGenAI | null = null;
 
-let genAI: GoogleGenerativeAI | null = null;
-let model: ModelType | null = null;
-
-function getModel(): ModelType {
-  if (!model) {
+function getClient(): GoogleGenAI {
+  if (!genAI) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error('GEMINI_API_KEY environment variable is not set');
-    genAI = new GoogleGenerativeAI(apiKey);
-    model = genAI.getGenerativeModel({
-      model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
-      generationConfig: {
-        responseMimeType: 'application/json',
-        temperature: 0.1, // Low temperature for consistent, deterministic mapping
-      },
-      systemInstruction: SYSTEM_PROMPT,
-    });
+    genAI = new GoogleGenAI({ apiKey });
   }
-  return model;
+  return genAI;
 }
 
 /**
@@ -186,7 +175,7 @@ export async function extractBatch(
   mappingPlan?: ValidatedMappingPlan | null,
   usageTracker?: ImportUsageTracker | null
 ): Promise<BatchResult> {
-  const m = getModel();
+  const ai = getClient();
   const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
   let mappingInstructions = '';
@@ -208,13 +197,21 @@ export async function extractBatch(
   const startTime = performance.now();
   let result: any;
   try {
-    result = await m.generateContent(prompt);
+    result = await ai.models.generateContent({
+      model: modelName,
+      contents: prompt,
+      config: {
+        systemInstruction: SYSTEM_PROMPT,
+        responseMimeType: 'application/json',
+        temperature: 0.1,
+      },
+    });
     const latencyMs = performance.now() - startTime;
     usageTracker?.recordGeminiResponse({
       callType: 'batch_extraction',
       modelId: modelName,
       latencyMs,
-      response: result?.response,
+      response: result?.response ?? result,
     });
   } catch (err) {
     const latencyMs = performance.now() - startTime;
@@ -228,7 +225,9 @@ export async function extractBatch(
     throw err;
   }
 
-  const responseText = result.response.text();
+  const responseText = typeof result?.text === 'function'
+    ? result.text()
+    : (result?.text ?? result?.response?.text?.() ?? '');
 
   // Parse: may throw for retry-eligible structural errors
   const parsedUnknown = parseAIResponseText(responseText);

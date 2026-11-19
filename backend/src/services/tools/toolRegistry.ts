@@ -1,4 +1,4 @@
-import { FunctionDeclaration } from '@google/generative-ai';
+import { FunctionDeclaration } from '@google/genai';
 import { getCrmSchema, getCrmSchemaDeclaration, GetCrmSchemaArgsSchema } from './crmSchema.tool';
 import {
   retrieveMappingExamples,

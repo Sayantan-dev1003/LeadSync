@@ -1,4 +1,4 @@
-import { FunctionDeclaration, SchemaType } from '@google/generative-ai';
+import { FunctionDeclaration, Type } from '@google/genai';
 import { z } from 'zod';
 import { CRMField, CRM_FIELDS } from '../../types';
 
@@ -337,11 +337,11 @@ export const retrieveMappingExamplesDeclaration: FunctionDeclaration = {
   name: 'retrieve_mapping_examples',
   description: 'Retrieve curated mapping examples and known real-world column aliases for given CSV header names. Call this tool when source column names are abbreviated, misspelled, or non-standard.',
   parameters: {
-    type: SchemaType.OBJECT,
+    type: Type.OBJECT,
     properties: {
       headers: {
-        type: SchemaType.ARRAY,
-        items: { type: SchemaType.STRING },
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
         description: 'Array of source CSV column headers to look up mapping examples for.',
       },
     },

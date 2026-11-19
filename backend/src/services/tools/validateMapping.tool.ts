@@ -1,4 +1,4 @@
-import { FunctionDeclaration, SchemaType } from '@google/generative-ai';
+import { FunctionDeclaration, Type } from '@google/genai';
 import { z } from 'zod';
 import { CRM_FIELDS, CRMField } from '../../types';
 
@@ -142,19 +142,19 @@ export const validateMappingDeclaration: FunctionDeclaration = {
   name: 'validate_mapping',
   description: 'Validate proposed source-to-target field mappings against the LeadSync CRM schema and uploaded CSV headers. Validates that target fields exist, source headers are present in the CSV, and checks for conflicting mappings.',
   parameters: {
-    type: SchemaType.OBJECT,
+    type: Type.OBJECT,
     properties: {
       mappings: {
-        type: SchemaType.ARRAY,
+        type: Type.ARRAY,
         items: {
-          type: SchemaType.OBJECT,
+          type: Type.OBJECT,
           properties: {
             source: {
-              type: SchemaType.STRING,
+              type: Type.STRING,
               description: 'Exact source CSV column header name.',
             },
             target: {
-              type: SchemaType.STRING,
+              type: Type.STRING,
               description: 'Target LeadSync CRM field name (e.g. "name", "email", "mobile_without_country_code", "crm_status", "crm_note", etc.) or "unmapped".',
             },
           },

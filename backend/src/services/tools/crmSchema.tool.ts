@@ -1,4 +1,4 @@
-import { FunctionDeclaration, SchemaType } from '@google/generative-ai';
+import { FunctionDeclaration, Type } from '@google/genai';
 import { z } from 'zod';
 import { CRM_FIELDS, CRM_STATUS_VALUES, DATA_SOURCE_VALUES } from '../../types';
 
@@ -176,7 +176,7 @@ export const getCrmSchemaDeclaration: FunctionDeclaration = {
   name: 'get_crm_schema',
   description: 'Inspect the official LeadSync CRM schema, including supported target fields, expected data types, accepted enum values, and validation constraints. Call this tool when analyzing CSV headers to verify valid target fields.',
   parameters: {
-    type: SchemaType.OBJECT,
+    type: Type.OBJECT,
     properties: {},
   },
 };

@@ -12,7 +12,7 @@ process.env.GEMINI_API_KEY = 'test-integration-key';
 process.env.GEMINI_MODEL = 'gemini-2.5-flash';
 
 import express from 'express';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 
 // Mock Prisma
 const mockPendingImports = new Map<string, any>();
@@ -130,9 +130,9 @@ jest.mock('../lib/prisma', () => {
   };
 });
 
-// Mock GoogleGenerativeAI
-jest.mock('@google/generative-ai');
-const MockedGoogleGenerativeAI = GoogleGenerativeAI as jest.MockedClass<typeof GoogleGenerativeAI>;
+// Mock GoogleGenAI
+jest.mock('@google/genai');
+const MockedGoogleGenAI = GoogleGenAI as jest.MockedClass<typeof GoogleGenAI>;
 
 import extractRouter from '../routes/extract.route';
 import importsRouter from '../routes/imports.route';
@@ -247,16 +247,18 @@ describe('End-to-End Tool Orchestration & Approval Integration Test', () => {
     mockSendMessage = jest.fn();
     mockGenerateContent = jest.fn();
 
-    MockedGoogleGenerativeAI.mockImplementation(
+    MockedGoogleGenAI.mockImplementation(
       () =>
         ({
-          getGenerativeModel: jest.fn(() => ({
-            startChat: jest.fn(() => ({
+          chats: {
+            create: jest.fn(() => ({
               sendMessage: mockSendMessage,
             })),
+          },
+          models: {
             generateContent: mockGenerateContent,
-          })),
-        }) as unknown as GoogleGenerativeAI
+          },
+        }) as unknown as GoogleGenAI
     );
   });
 
@@ -370,20 +372,23 @@ describe('End-to-End Tool Orchestration & Approval Integration Test', () => {
     expect(mockSendMessage).toHaveBeenCalledTimes(3);
 
     // Verify turn 1 executed get_crm_schema and retrieve_mapping_examples
-    const turn2Input = mockSendMessage.mock.calls[1][0];
+    const turn2Param = mockSendMessage.mock.calls[1][0];
+    const turn2Input = turn2Param.message ?? turn2Param;
     expect(turn2Input).toHaveLength(2);
     expect(turn2Input[0].functionResponse.name).toBe('get_crm_schema');
     expect(turn2Input[1].functionResponse.name).toBe('retrieve_mapping_examples');
 
     // Verify turn 2 executed validate_mapping
-    const turn3Input = mockSendMessage.mock.calls[2][0];
+    const turn3Param = mockSendMessage.mock.calls[2][0];
+    const turn3Input = turn3Param.message ?? turn3Param;
     expect(turn3Input).toHaveLength(1);
     expect(turn3Input[0].functionResponse.name).toBe('validate_mapping');
     expect(turn3Input[0].functionResponse.response.valid).toBe(true);
 
     // Verify Stage B extraction was called with validated mappings
     expect(mockGenerateContent).toHaveBeenCalledTimes(1);
-    const extractionPrompt = mockGenerateContent.mock.calls[0][0];
+    const callArg = mockGenerateContent.mock.calls[0][0];
+    const extractionPrompt = typeof callArg === 'string' ? callArg : (callArg.contents ?? '');
     expect(extractionPrompt).toContain('VALIDATED COLUMN MAPPINGS');
     expect(extractionPrompt).toContain('Cust_Name');
 

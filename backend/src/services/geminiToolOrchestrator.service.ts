@@ -1,8 +1,8 @@
 import {
-  GoogleGenerativeAI,
-  FunctionCallingMode,
-  Part,
-} from '@google/generative-ai';
+  GoogleGenAI,
+  FunctionCallingConfigMode,
+  type Part,
+} from '@google/genai';
 import { performance } from 'perf_hooks';
 import { z } from 'zod';
 import {
@@ -161,23 +161,21 @@ export async function planMappingsWithTools(
   }
 
   const toolDeclarations = getRegisteredToolDeclarations();
-  const genAI = new GoogleGenerativeAI(apiKey);
+  const ai = new GoogleGenAI({ apiKey });
 
-  const model = genAI.getGenerativeModel({
+  const chat = ai.chats.create({
     model: modelName,
-    systemInstruction: TOOL_ORCHESTRATOR_SYSTEM_PROMPT,
-    tools: [{ functionDeclarations: toolDeclarations }],
-    toolConfig: {
-      functionCallingConfig: {
-        mode: FunctionCallingMode.AUTO,
+    config: {
+      systemInstruction: TOOL_ORCHESTRATOR_SYSTEM_PROMPT,
+      tools: [{ functionDeclarations: toolDeclarations }],
+      toolConfig: {
+        functionCallingConfig: {
+          mode: FunctionCallingConfigMode.AUTO,
+        },
       },
-    },
-    generationConfig: {
       temperature,
     },
   });
-
-  const chat = model.startChat();
 
   const userPrompt = `Here are the column headers extracted from the uploaded CSV:
 ${JSON.stringify(sourceHeaders, null, 2)}
@@ -198,13 +196,17 @@ Please determine the optimal mapping onto the LeadSync CRM target schema. Use th
     const t0 = performance.now();
     let currentResult: any;
     try {
-      currentResult = await chat.sendMessage(userPrompt, { signal: abortController.signal });
+      currentResult = await chat.sendMessage({
+        message: userPrompt,
+        config: { abortSignal: abortController.signal },
+      });
       const latencyMs = performance.now() - t0;
+      const initialResponse = currentResult?.response ?? currentResult;
       options.usageTracker?.recordGeminiResponse({
         callType: 'mapping_plan_initial',
         modelId: modelName,
         latencyMs,
-        response: currentResult.response,
+        response: initialResponse,
       });
     } catch (err) {
       const latencyMs = performance.now() - t0;
@@ -221,15 +223,19 @@ Please determine the optimal mapping onto the LeadSync CRM target schema. Use th
     for (let round = 1; round <= maxRounds; round++) {
       tracker.recordRound();
 
-      const response = currentResult.response;
-      tracker.recordTokenUsage(response.usageMetadata);
+      const response = currentResult?.response ?? currentResult;
+      if (response?.usageMetadata) {
+        tracker.recordTokenUsage(response.usageMetadata);
+      }
 
       // Inspect native function calls from Gemini
-      const functionCalls = response.functionCalls();
+      const functionCalls = typeof response?.functionCalls === 'function'
+        ? response.functionCalls()
+        : response?.functionCalls;
 
       // If Gemini did not call any tools, it concluded and returned the final plan
       if (!functionCalls || functionCalls.length === 0) {
-        const text = response.text();
+        const text = typeof response?.text === 'function' ? response.text() : (response?.text ?? '');
         mappings = parseFinalMappingPlan(text);
         break;
       }
@@ -292,7 +298,7 @@ Please determine the optimal mapping onto the LeadSync CRM target schema. Use th
           functionResponse: {
             name: call.name,
             response: execResult.success
-              ? (execResult.data as object)
+              ? (execResult.data as Record<string, unknown>)
               : { error: execResult.error },
           },
         });
@@ -302,13 +308,17 @@ Please determine the optimal mapping onto the LeadSync CRM target schema. Use th
       tracker.recordModelRequest();
       const tRound = performance.now();
       try {
-        currentResult = await chat.sendMessage(functionResponses, { signal: abortController.signal });
+        currentResult = await chat.sendMessage({
+          message: functionResponses,
+          config: { abortSignal: abortController.signal },
+        });
         const latencyMs = performance.now() - tRound;
+        const roundResponse = currentResult?.response ?? currentResult;
         options.usageTracker?.recordGeminiResponse({
           callType: 'mapping_plan_function_response',
           modelId: modelName,
           latencyMs,
-          response: currentResult.response,
+          response: roundResponse,
         });
       } catch (err) {
         const latencyMs = performance.now() - tRound;
@@ -324,9 +334,12 @@ Please determine the optimal mapping onto the LeadSync CRM target schema. Use th
 
       // If this was the last allowed round, attempt to parse the final response
       if (round === maxRounds) {
-        const finalResponse = currentResult.response;
-        tracker.recordTokenUsage(finalResponse.usageMetadata);
-        mappings = parseFinalMappingPlan(finalResponse.text());
+        const finalResponse = currentResult?.response ?? currentResult;
+        if (finalResponse?.usageMetadata) {
+          tracker.recordTokenUsage(finalResponse.usageMetadata);
+        }
+        const finalText = typeof finalResponse?.text === 'function' ? finalResponse.text() : (finalResponse?.text ?? '');
+        mappings = parseFinalMappingPlan(finalText);
       }
     }
 

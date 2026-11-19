@@ -1,13 +1,14 @@
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { GoogleGenAI } = require('@google/genai');
 require('dotenv').config();
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 async function run() {
   try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`);
-    const data = await response.json();
-    console.log(data.models.map(m => m.name));
+    const response = await ai.models.list();
+    for await (const model of response) {
+      console.log(model.name);
+    }
   } catch (err) {
     console.error(err);
   }

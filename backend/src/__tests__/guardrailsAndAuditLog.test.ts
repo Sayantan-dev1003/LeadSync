@@ -5,12 +5,12 @@ import {
 } from '../services/tools/toolRegistry';
 import { auditLogger, ToolExecutionAuditLog, LifecycleAuditLog } from '../services/auditLogger.service';
 import { planMappingsWithTools } from '../services/geminiToolOrchestrator.service';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 import { AuthUser } from '../middleware/auth.middleware';
 
 // Mock the Gemini SDK for orchestrator limit tests
-jest.mock('@google/generative-ai');
-const MockedGoogleGenerativeAI = GoogleGenerativeAI as jest.MockedClass<typeof GoogleGenerativeAI>;
+jest.mock('@google/genai');
+const MockedGoogleGenAI = GoogleGenAI as jest.MockedClass<typeof GoogleGenAI>;
 
 describe('Part 3 & Part 4: Function-Calling Guardrails & Structured Audit Logging', () => {
   let capturedLogs: Array<ToolExecutionAuditLog | LifecycleAuditLog> = [];
@@ -165,9 +165,8 @@ describe('Part 3 & Part 4: Function-Calling Guardrails & Structured Audit Loggin
           });
 
         const mockChat = { sendMessage: mockSendMessage };
-        const mockModel = { startChat: () => mockChat };
-        MockedGoogleGenerativeAI.mockImplementation(
-          () => ({ getGenerativeModel: () => mockModel } as any)
+        MockedGoogleGenAI.mockImplementation(
+          () => ({ chats: { create: () => mockChat } } as any)
         );
 
         // maxToolCalls=3 means: after 3 tool executions the 4th is blocked with TOOL_CALL_LIMIT_EXCEEDED.
@@ -208,9 +207,8 @@ describe('Part 3 & Part 4: Function-Calling Guardrails & Structured Audit Loggin
         });
 
         const mockChat = { sendMessage: mockSendMessage };
-        const mockModel = { startChat: () => mockChat };
-        MockedGoogleGenerativeAI.mockImplementation(
-          () => ({ getGenerativeModel: () => mockModel } as any)
+        MockedGoogleGenAI.mockImplementation(
+          () => ({ chats: { create: () => mockChat } } as any)
         );
 
         const { fallbackOccurred } = await planMappingsWithTools(['Cust_Name'], {

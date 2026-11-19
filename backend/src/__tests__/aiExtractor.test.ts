@@ -10,13 +10,12 @@ process.env.GEMINI_API_KEY = 'test-key';
 // The mock must be declared before imports. The mock factory captures a reference
 // to a shared mock function so individual tests can configure it via mockImplementation.
 const mockGenerateContent = jest.fn();
-const mockGetGenerativeModel = jest.fn(() => ({
-  generateContent: mockGenerateContent,
-}));
 
-jest.mock('@google/generative-ai', () => ({
-  GoogleGenerativeAI: jest.fn(() => ({
-    getGenerativeModel: mockGetGenerativeModel,
+jest.mock('@google/genai', () => ({
+  GoogleGenAI: jest.fn(() => ({
+    models: {
+      generateContent: mockGenerateContent,
+    },
   })),
 }));
 
@@ -25,7 +24,10 @@ jest.mock('@google/generative-ai', () => ({
 import type { RawRow } from '../types';
 
 function makeResponse(text: string) {
-  return { response: { text: () => text } };
+  return {
+    text,
+    response: { text: () => text },
+  };
 }
 
 const sampleRawRows: RawRow[] = [

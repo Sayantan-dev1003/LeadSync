@@ -1,7 +1,7 @@
 /**
  * Tests for Gemini Function Calling (Tool Use) and Tool Orchestration.
  *
- * Mocks the Gemini SDK (@google/generative-ai) to test genuine multi-turn
+ * Mocks the Gemini SDK (@google/genai) to test genuine multi-turn
  * tool-calling message exchange, dynamic tool selection, parameter validation,
  * limits, security boundaries, and fallback behavior.
  */
@@ -10,17 +10,16 @@
 process.env.GEMINI_API_KEY = 'test-api-key';
 
 import { planMappingsWithTools } from '../services/geminiToolOrchestrator.service';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 
 // Mock the Gemini SDK
-jest.mock('@google/generative-ai');
+jest.mock('@google/genai');
 
-const MockedGoogleGenerativeAI = GoogleGenerativeAI as jest.MockedClass<typeof GoogleGenerativeAI>;
+const MockedGoogleGenAI = GoogleGenAI as jest.MockedClass<typeof GoogleGenAI>;
 
 describe('Gemini Function Calling & Tool Orchestrator', () => {
   let mockSendMessage: jest.Mock;
   let mockStartChat: jest.Mock;
-  let mockGetGenerativeModel: jest.Mock;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -30,15 +29,13 @@ describe('Gemini Function Calling & Tool Orchestrator', () => {
       sendMessage: mockSendMessage,
     }));
 
-    mockGetGenerativeModel = jest.fn(() => ({
-      startChat: mockStartChat,
-    }));
-
-    MockedGoogleGenerativeAI.mockImplementation(
+    MockedGoogleGenAI.mockImplementation(
       () =>
         ({
-          getGenerativeModel: mockGetGenerativeModel,
-        }) as unknown as GoogleGenerativeAI
+          chats: {
+            create: mockStartChat,
+          },
+        }) as unknown as GoogleGenAI
     );
   });
 
@@ -81,7 +78,8 @@ describe('Gemini Function Calling & Tool Orchestrator', () => {
     expect(mockSendMessage).toHaveBeenCalledTimes(2);
 
     // Verify turn 2 sent the structured tool response back to Gemini
-    const secondCallArg = mockSendMessage.mock.calls[1][0];
+    const secondCallParam = mockSendMessage.mock.calls[1][0];
+    const secondCallArg = secondCallParam.message ?? secondCallParam;
     expect(secondCallArg).toHaveLength(1);
     expect(secondCallArg[0].functionResponse.name).toBe('get_crm_schema');
     expect(secondCallArg[0].functionResponse.response.totalFields).toBe(15);
@@ -128,7 +126,8 @@ describe('Gemini Function Calling & Tool Orchestrator', () => {
     expect(result.plan?.toolCallsExecuted).toEqual(['retrieve_mapping_examples']);
 
     // Check that retrieve_mapping_examples returned matches to the model
-    const secondCallArg = mockSendMessage.mock.calls[1][0];
+    const secondCallParam = mockSendMessage.mock.calls[1][0];
+    const secondCallArg = secondCallParam.message ?? secondCallParam;
     expect(secondCallArg[0].functionResponse.name).toBe('retrieve_mapping_examples');
     expect(secondCallArg[0].functionResponse.response.totalMatches).toBeGreaterThan(0);
   });
@@ -170,7 +169,8 @@ describe('Gemini Function Calling & Tool Orchestrator', () => {
     ]);
 
     // Backend responded with both tool results in turn 2
-    const secondCallArg = mockSendMessage.mock.calls[1][0];
+    const secondCallParam = mockSendMessage.mock.calls[1][0];
+    const secondCallArg = secondCallParam.message ?? secondCallParam;
     expect(secondCallArg).toHaveLength(2);
     expect(secondCallArg[0].functionResponse.name).toBe('get_crm_schema');
     expect(secondCallArg[1].functionResponse.name).toBe('retrieve_mapping_examples');
@@ -229,7 +229,8 @@ describe('Gemini Function Calling & Tool Orchestrator', () => {
 
     expect(result.fallbackOccurred).toBe(false);
     // Check that backend returned error for unauthorized tool
-    const secondCallArg = mockSendMessage.mock.calls[1][0];
+    const secondCallParam = mockSendMessage.mock.calls[1][0];
+    const secondCallArg = secondCallParam.message ?? secondCallParam;
     expect(secondCallArg[0].functionResponse.response.error).toContain('Unauthorized or unknown tool');
   });
 
@@ -259,7 +260,8 @@ describe('Gemini Function Calling & Tool Orchestrator', () => {
     const result = await planMappingsWithTools(headers);
 
     expect(result.fallbackOccurred).toBe(false);
-    const secondCallArg = mockSendMessage.mock.calls[1][0];
+    const secondCallParam = mockSendMessage.mock.calls[1][0];
+    const secondCallArg = secondCallParam.message ?? secondCallParam;
     expect(secondCallArg[0].functionResponse.response.error).toContain('Invalid arguments for tool');
   });
 
@@ -297,7 +299,8 @@ describe('Gemini Function Calling & Tool Orchestrator', () => {
     const result = await planMappingsWithTools(headers, { maxToolCalls: 5 });
 
     expect(result.fallbackOccurred).toBe(false);
-    const secondCallArg = mockSendMessage.mock.calls[1][0];
+    const secondCallParam = mockSendMessage.mock.calls[1][0];
+    const secondCallArg = secondCallParam.message ?? secondCallParam;
     // The 6th response should be an error indicating tool call limit exceeded
     expect(secondCallArg[5].functionResponse.response.error).toContain('limit of 5 exceeded');
   });
@@ -317,10 +320,12 @@ describe('Gemini Function Calling & Tool Orchestrator', () => {
 
     // Verify AbortSignal was passed to the underlying request and was aborted upon timeout
     expect(mockSendMessage).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.objectContaining({ signal: expect.any(Object) })
+      expect.objectContaining({
+        message: expect.any(String),
+        config: expect.objectContaining({ abortSignal: expect.any(Object) }),
+      })
     );
-    const passedSignal = mockSendMessage.mock.calls[0][1].signal as AbortSignal;
+    const passedSignal = mockSendMessage.mock.calls[0][0].config.abortSignal as AbortSignal;
     expect(passedSignal.aborted).toBe(true);
   });
 
