@@ -36,11 +36,12 @@ export function getAuthSecret(): string {
 
 /**
  * Checks whether local development demo mode is explicitly enabled.
- * Never allowed in production mode.
+ * Strictly restricted to NODE_ENV === 'development' with explicit opt-in.
+ * Never allowed in test or production environments.
  */
 export function isDevDemoAuthEnabled(): boolean {
   return (
-    process.env.NODE_ENV !== 'production' &&
+    process.env.NODE_ENV === 'development' &&
     (process.env.ALLOW_DEV_ANONYMOUS === 'true' || process.env.ENABLE_DEV_DEMO_AUTH === 'true')
   );
 }

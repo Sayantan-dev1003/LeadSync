@@ -17,7 +17,7 @@ jobs:
       DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/groweasy_ci"
       GEMINI_API_KEY: "test-gemini-api-key"
       JWT_SECRET: "ci-secret-key-at-least-32-characters-long-for-hmac-sha256"
-      ALLOW_DEV_ANONYMOUS: "true"
+      ALLOW_DEV_ANONYMOUS: "false"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

@@ -183,8 +183,18 @@ function invokeRouter(
   });
 }
 
+const initialEnv = { ...process.env };
+
 beforeEach(() => {
   jest.clearAllMocks();
+  process.env = { ...initialEnv };
+  process.env.NODE_ENV = 'test';
+  delete process.env.ALLOW_DEV_ANONYMOUS;
+  delete process.env.ENABLE_DEV_DEMO_AUTH;
+});
+
+afterAll(() => {
+  process.env = initialEnv;
 });
 
 const sampleValidRecord: CRMRecord = {
@@ -875,14 +885,18 @@ describe('Phase C: Real Data Contract Integration (Extraction -> Staging -> Appr
 // Phase D: Authentication & Authorization Requirements
 // ============================================================================
 describe('Phase D: Authentication Middleware & Integration', () => {
-  const originalEnv = process.env;
-
   beforeEach(() => {
-    process.env = { ...originalEnv };
+    process.env = { ...initialEnv };
+    process.env.NODE_ENV = 'test';
+    delete process.env.ALLOW_DEV_ANONYMOUS;
+    delete process.env.ENABLE_DEV_DEMO_AUTH;
   });
 
-  afterAll(() => {
-    process.env = originalEnv;
+  afterEach(() => {
+    process.env = { ...initialEnv };
+    process.env.NODE_ENV = 'test';
+    delete process.env.ALLOW_DEV_ANONYMOUS;
+    delete process.env.ENABLE_DEV_DEMO_AUTH;
   });
 
   it('rejects placeholder Bearer tokens (e.g. demo-reviewer-token) with 401', async () => {
@@ -957,6 +971,20 @@ describe('Phase D: Authentication Middleware & Integration', () => {
     const { statusCode, body } = await invokeRouter(importsRouter, {
       method: 'GET',
       url: '/pending/pending_prod_check',
+      headers: {},
+    });
+
+    expect(statusCode).toBe(401);
+    expect(body.error).toMatch(/Authentication required/i);
+  });
+
+  it('strictly disallows anonymous access during test and CI execution even if ALLOW_DEV_ANONYMOUS=true', async () => {
+    process.env.NODE_ENV = 'test';
+    process.env.ALLOW_DEV_ANONYMOUS = 'true';
+
+    const { statusCode, body } = await invokeRouter(importsRouter, {
+      method: 'POST',
+      url: '/pending_ci_test/approve',
       headers: {},
     });
 
