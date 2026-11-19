@@ -118,7 +118,7 @@ function getModel(): ModelType {
     if (!apiKey) throw new Error('GEMINI_API_KEY environment variable is not set');
     genAI = new GoogleGenerativeAI(apiKey);
     model = genAI.getGenerativeModel({
-      model: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+      model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
       generationConfig: {
         responseMimeType: 'application/json',
         temperature: 0.1, // Low temperature for consistent, deterministic mapping

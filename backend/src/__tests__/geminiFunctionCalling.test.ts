@@ -302,7 +302,7 @@ describe('Gemini Function Calling & Tool Orchestrator', () => {
     expect(secondCallArg[5].functionResponse.response.error).toContain('limit of 5 exceeded');
   });
 
-  it('triggers safe fallback when tool orchestration times out', async () => {
+  it('triggers safe fallback and aborts underlying request when tool orchestration times out', async () => {
     const headers = ['Cust_Name'];
 
     // Hangs forever
@@ -314,6 +314,14 @@ describe('Gemini Function Calling & Tool Orchestrator', () => {
 
     expect(result.fallbackOccurred).toBe(true);
     expect(result.plan).toBeNull();
+
+    // Verify AbortSignal was passed to the underlying request and was aborted upon timeout
+    expect(mockSendMessage).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ signal: expect.any(Object) })
+    );
+    const passedSignal = mockSendMessage.mock.calls[0][1].signal as AbortSignal;
+    expect(passedSignal.aborted).toBe(true);
   });
 
   it('triggers safe fallback when model produces an invalid mapping that fails server validation', async () => {

@@ -451,7 +451,7 @@ CSV Upload (e.g. messy_manual_spreadsheet.csv)
 1. Configure your `.env` in `backend/`:
    ```env
    GEMINI_API_KEY="your-real-gemini-api-key"
-   GEMINI_MODEL="gemini-1.5-flash"
+   GEMINI_MODEL="gemini-2.5-flash"
    ```
 2. Start the backend:
    ```bash
@@ -465,6 +465,38 @@ CSV Upload (e.g. messy_manual_spreadsheet.csv)
    ```text
    [ToolObservability] Completed in 842ms | Requests: 3 | Rounds: 3 | Tools Called: 2 (retrieve_mapping_examples, validate_mapping) | Executed: 2 | Failed: 0 | Fallback: false
    ```
+
+---
+
+### 7. Controlled SDK Migration Roadmap (`@google/generative-ai` ➔ `@google/genai`)
+
+The current implementation leverages Google's native function calling via `@google/generative-ai` (with genuine `FunctionDeclaration` OpenAPI specifications and multi-turn `functionResponse` message cycles). Google has introduced `@google/genai` (The Google Gen AI SDK) as the unified successor SDK. To ensure zero downtime, guaranteed offline CI builds, and full backward compatibility, the migration follows this controlled 4-stage transition:
+
+#### Architectural Mapping
+
+| Feature | Legacy SDK (`@google/generative-ai`) | New SDK (`@google/genai`) | Transition Strategy |
+|---|---|---|---|
+| **Client Initialization** | `new GoogleGenerativeAI(apiKey)` | `new GoogleGenAI({ apiKey })` | Wrap in singleton provider (`aiProvider.ts`) |
+| **Model & Instruction** | `genAI.getGenerativeModel({ model, systemInstruction })` | Model passed per call or in config (`ai.chats.create`) | Unified config builder |
+| **Function Declarations** | `FunctionDeclaration` with `FunctionDeclarationSchemaType` | Declarations with `Type` enum from `@google/genai` | Abstract tool declaration schema mapper |
+| **Tool Execution Response** | `{ functionResponse: { name, response } }` Part | `{ functionResponse: { name, response } }` Part | Compatible message payload structure |
+| **Batch Structured Extraction** | `model.generateContent(prompt)` | `ai.models.generateContent({ model, contents })` | Drop-in extraction adapter |
+| **Cancellation & Timeouts** | `AbortSignal` via `SingleRequestOptions.signal` | `AbortSignal` via client call options | Preserves robust `AbortController` cancellation |
+
+#### Migration Phases
+
+1. **Phase 1: Robust Baseline (Completed)**:
+   - Default model set to active `gemini-2.5-flash`.
+   - Tool registry hardened with own-property checks (`Object.prototype.hasOwnProperty`).
+   - Request cancellation backed by `AbortController` and `AbortSignal` inside `Promise.race()`.
+   - Comprehensive test suite (184 backend unit & integration tests) locking all contracts.
+2. **Phase 2: Dependency & Adapter Layer**:
+   - Install `@google/genai` when network access is enabled in production/deployment CI.
+   - Implement an abstraction wrapper `IGeminiClient` allowing runtime or environment toggle between SDKs (`USE_GENAI_SDK=true/false`).
+3. **Phase 3: Dual-Run Shadow Validation**:
+   - Run tool orchestrator against `@google/genai` in staging with automated parity checks against the mock test suite.
+4. **Phase 4: Deprecation Cleanup**:
+   - Remove `@google/generative-ai` from `package.json` and prune legacy adapter code.
 
 ---
 
@@ -487,7 +519,7 @@ docker-compose up --build -d
 ```bash
 cd backend
 npm test
-# 145 tests passing across 7 suites (auth, zodSchemas, aiExtractor, approvalWorkflow, csvParser, validators, importOrchestrator)
+# 184 tests passing across 10 suites (tools, geminiFunctionCalling, toolIntegrationWorkflow, auth, zodSchemas, aiExtractor, approvalWorkflow, csvParser, validators, importOrchestrator)
 ```
 
 ### Run Frontend Tests

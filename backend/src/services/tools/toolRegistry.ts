@@ -74,7 +74,13 @@ export async function executeBackendTool(
   rawArgs: unknown,
   context: ToolExecutionContext
 ): Promise<{ success: boolean; data?: unknown; error?: string }> {
-  // 1. Allowlist verification
+  // 1. Allowlist verification using own-property check to prevent prototype pollution or shadowing
+  if (!Object.prototype.hasOwnProperty.call(TOOL_REGISTRY, toolName)) {
+    return {
+      success: false,
+      error: `Unauthorized or unknown tool: "${toolName}". Allowed tools: ${ALLOWED_TOOL_NAMES.join(', ')}`,
+    };
+  }
   const tool = TOOL_REGISTRY[toolName];
   if (!tool) {
     return {

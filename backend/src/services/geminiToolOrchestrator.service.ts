@@ -139,7 +139,7 @@ export async function planMappingsWithTools(
   const maxRounds = options.maxRounds ?? DEFAULT_MAX_ROUNDS;
   const maxToolCalls = options.maxToolCalls ?? DEFAULT_MAX_TOOL_CALLS;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const modelName = options.modelName ?? process.env.GEMINI_MODEL ?? 'gemini-1.5-flash';
+  const modelName = options.modelName ?? process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
   const temperature = options.temperature ?? 0.1;
 
   const apiKey = process.env.GEMINI_API_KEY;
@@ -174,6 +174,7 @@ ${JSON.stringify(sourceHeaders, null, 2)}
 Please determine the optimal mapping onto the LeadSync CRM target schema. Use the available backend tools to inspect the schema, retrieve known examples for unclear headers, and validate your proposed mappings. Then output the final JSON mapping plan.`;
 
   let totalToolCalls = 0;
+  const abortController = new AbortController();
 
   const executeWithTimeout = async (): Promise<{
     finalMappings: ColumnMapping[] | null;
@@ -183,7 +184,7 @@ Please determine the optimal mapping onto the LeadSync CRM target schema. Use th
     let mappings: ColumnMapping[] | null = null;
 
     tracker.recordModelRequest();
-    let currentResult = await chat.sendMessage(userPrompt);
+    let currentResult = await chat.sendMessage(userPrompt, { signal: abortController.signal });
 
     for (let round = 1; round <= maxRounds; round++) {
       tracker.recordRound();
@@ -239,7 +240,7 @@ Please determine the optimal mapping onto the LeadSync CRM target schema. Use th
 
       // Send function responses back to the model for the next turn
       tracker.recordModelRequest();
-      currentResult = await chat.sendMessage(functionResponses);
+      currentResult = await chat.sendMessage(functionResponses, { signal: abortController.signal });
 
       // If this was the last allowed round, attempt to parse the final response
       if (round === maxRounds) {
@@ -253,20 +254,30 @@ Please determine the optimal mapping onto the LeadSync CRM target schema. Use th
   };
 
   let executionOutcome: { finalMappings: ColumnMapping[] | null; toolCallsExecuted: string[] };
+  let timeoutTimer: NodeJS.Timeout | undefined;
 
   try {
-    // Run conversation with overall timeout
+    // Run conversation with overall timeout and abort signal cancellation
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutTimer = setTimeout(() => {
+        abortController.abort();
+        reject(new Error(`Tool orchestration timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+
     executionOutcome = await Promise.race([
       executeWithTimeout(),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Tool orchestration timed out after ${timeoutMs}ms`)), timeoutMs)
-      ),
+      timeoutPromise,
     ]);
   } catch (err: unknown) {
     const rawMessage = err instanceof Error ? err.message : 'Unknown error during tool orchestration';
     tracker.recordFallback(rawMessage);
     tracker.logSummary();
     return { plan: null, fallbackOccurred: true };
+  } finally {
+    if (timeoutTimer) {
+      clearTimeout(timeoutTimer);
+    }
   }
 
   const { finalMappings, toolCallsExecuted } = executionOutcome;

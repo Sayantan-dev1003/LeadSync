@@ -71,7 +71,7 @@ app.use((_req: Request, res: Response) => {
 app.listen(PORT, () => {
   console.log(`🚀 LeadSync Backend running on http://localhost:${PORT}`);
   console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`   Model: ${process.env.GEMINI_MODEL || 'gemini-1.5-flash'}`);
+  console.log(`   Model: ${process.env.GEMINI_MODEL || 'gemini-2.5-flash'}`);
 });
 
 export default app;

@@ -269,6 +269,15 @@ describe('Tool Registry and Dispatcher', () => {
     expect(result.error).toContain('Unauthorized or unknown tool');
   });
 
+  it('rejects prototype properties and shadowed Object properties defensively', async () => {
+    const protoProperties = ['toString', 'constructor', 'hasOwnProperty', '__proto__', 'valueOf'];
+    for (const prop of protoProperties) {
+      const result = await executeBackendTool(prop, {}, { availableHeaders: [] });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Unauthorized or unknown tool');
+    }
+  });
+
   it('validates tool arguments on execution', async () => {
     const result = await executeBackendTool(
       'retrieve_mapping_examples',

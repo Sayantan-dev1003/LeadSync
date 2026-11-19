@@ -9,7 +9,7 @@
  */
 
 process.env.GEMINI_API_KEY = 'test-integration-key';
-process.env.GEMINI_MODEL = 'gemini-1.5-flash';
+process.env.GEMINI_MODEL = 'gemini-2.5-flash';
 
 import express from 'express';
 import { GoogleGenerativeAI } from '@google/generative-ai';
