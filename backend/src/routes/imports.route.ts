@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import prisma from '../lib/prisma';
-import { validateAIRow } from '../services/zodSchemas.service';
+import { validateCRMRecord } from '../services/zodSchemas.service';
 import { shouldSkipRow } from '../services/validators.service';
 import {
   requireAuth,
@@ -176,16 +176,20 @@ router.post('/:pendingImportId/approve', requireAuth, async (req: Request, res: 
       return;
     }
 
-    // 2. Server-side revalidation of records before persistence
+    // 2. Server-side revalidation of records before persistence using CRMRecordSchema
     const rawRecords = Array.isArray(initialPending.records) ? (initialPending.records as unknown[]) : [];
     const revalidatedRecords: CRMRecord[] = [];
 
     for (let i = 0; i < rawRecords.length; i++) {
       const row = rawRecords[i];
-      const parseResult = validateAIRow(row);
+      const parseResult = validateCRMRecord(row);
       if (!parseResult.success) {
+        // Avoid exposing sensitive CRM values in validation error messages
+        const sanitizedErrors = parseResult.error.errors
+          .map((e) => `${e.path.join('.') || 'field'}: ${e.message}`)
+          .join('; ');
         res.status(422).json({
-          error: `Invalid pending data at record ${i + 1}: ${parseResult.error.errors.map((e) => e.message).join('; ')}`,
+          error: `Invalid pending data at record ${i + 1}: ${sanitizedErrors}`,
         });
         return;
       }
@@ -198,8 +202,7 @@ router.post('/:pendingImportId/approve', requireAuth, async (req: Request, res: 
         return;
       }
 
-      const { skip: _s, skipReason: _sr, ...crmRecord } = data;
-      revalidatedRecords.push(crmRecord as CRMRecord);
+      revalidatedRecords.push(data as CRMRecord);
     }
 
     const skipped = Array.isArray(initialPending.skipped) ? (initialPending.skipped as unknown as SkippedRow[]) : [];

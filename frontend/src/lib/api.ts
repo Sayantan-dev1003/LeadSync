@@ -2,16 +2,23 @@ import type { CRMRecord, SkippedRow, FailedRow, ApproveResponse, RejectResponse,
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000';
 
-export function getAuthToken(): string {
+export function getAuthToken(): string | null {
   if (typeof window !== 'undefined') {
     const stored = localStorage.getItem('leadsync_auth_token');
-    if (stored) return stored;
+    if (stored && stored.trim() && stored !== 'demo-reviewer-token') {
+      return stored.trim();
+    }
   }
-  return process.env.NEXT_PUBLIC_API_TOKEN || 'demo-reviewer-token';
+  const envToken = process.env.NEXT_PUBLIC_API_TOKEN;
+  if (envToken && envToken.trim() && envToken !== 'demo-reviewer-token') {
+    return envToken.trim();
+  }
+  return null;
 }
 
 export function getAuthHeaders(): Record<string, string> {
   const token = getAuthToken();
+  if (!token) return {};
   return {
     Authorization: `Bearer ${token}`,
   };
@@ -133,6 +140,31 @@ export async function extractLeads(
       // Stop reading once we've received a terminal event
       if (receivedCompleteEvent || errorFromStream !== null) {
         break;
+      }
+    }
+
+    // Process any trailing frame left in buffer after stream ends
+    if (buffer.trim() && !receivedCompleteEvent && errorFromStream === null) {
+      const dataLine = buffer.trim();
+      if (dataLine.startsWith('data: ')) {
+        const jsonStr = dataLine.slice(6);
+        try {
+          const event = JSON.parse(jsonStr) as ExtractEvent;
+          if (event.type === 'complete') {
+            if (
+              !event.pendingImportId ||
+              typeof event.pendingImportId !== 'string' ||
+              event.pendingImportId.trim() === ''
+            ) {
+              errorFromStream = 'Malformed completion event: missing pendingImportId';
+            } else {
+              receivedCompleteEvent = true;
+            }
+          } else if (event.type === 'error') {
+            errorFromStream = event.message;
+          }
+          onEvent(event);
+        } catch {}
       }
     }
   } finally {

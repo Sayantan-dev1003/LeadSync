@@ -196,31 +196,68 @@ export const skipField = z
   });
 
 // ---------------------------------------------------------------------------
-// Row schema
+// Row schemas
 // ---------------------------------------------------------------------------
 
 /**
- * Schema for a single AI-extracted CRM row (including the skip hint fields).
+ * Shared CRM field validators matching the 15 standard CRM fields.
+ * Reused between CRMRecordSchema and AIExtractedRowSchema to prevent schema drift.
+ */
+export const crmFieldsShape = {
+  created_at: isoDateOrNull,
+  name: nullableString,
+  email: emailOrNull,
+  country_code: countryCodeOrNull,
+  mobile_without_country_code: mobileOrNull,
+  company: nullableString,
+  city: nullableString,
+  state: nullableString,
+  country: nullableString,
+  lead_owner: nullableString,
+  crm_status: crmStatusOrNull,
+  crm_note: nullableString,
+  data_source: dataSourceOrNull,
+  possession_time: nullableString,
+  description: nullableString,
+};
+
+/**
+ * Dedicated schema for normalized, staged CRM records awaiting human approval and persistence.
+ * Strict: rejects unexpected fields (including AI-only fields like skip and skipReason).
+ * Explicit: all 15 CRM contract keys must be present (nullable fields can be null).
+ */
+export const CRMRecordSchema = z.object(crmFieldsShape).strict();
+
+export type ValidatedCRMRecord = z.output<typeof CRMRecordSchema>;
+
+/**
+ * Validates a single staged CRM record before database persistence.
+ * Returns { success: true, data } or { success: false, error }.
+ */
+export function validateCRMRecord(raw: unknown): z.SafeParseReturnType<unknown, ValidatedCRMRecord> {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return {
+      success: false,
+      error: new z.ZodError([
+        {
+          code: z.ZodIssueCode.custom,
+          path: [],
+          message: `Expected an object, got ${Array.isArray(raw) ? 'array' : typeof raw}`,
+        },
+      ]),
+    };
+  }
+  return CRMRecordSchema.safeParse(raw);
+}
+
+/**
+ * Schema for a single raw AI-extracted row from Gemini (including the skip hint fields).
  * Strict: rejects unexpected fields.
- * Explicit: all 17 CRM contract keys must be present (nullable fields can be null).
+ * Explicit: all 17 keys must be present (nullable fields can be null).
  */
 export const AIExtractedRowSchema = z
   .object({
-    created_at: isoDateOrNull,
-    name: nullableString,
-    email: emailOrNull,
-    country_code: countryCodeOrNull,
-    mobile_without_country_code: mobileOrNull,
-    company: nullableString,
-    city: nullableString,
-    state: nullableString,
-    country: nullableString,
-    lead_owner: nullableString,
-    crm_status: crmStatusOrNull,
-    crm_note: nullableString,
-    data_source: dataSourceOrNull,
-    possession_time: nullableString,
-    description: nullableString,
+    ...crmFieldsShape,
     skip: skipField,
     skipReason: nullableString,
   })

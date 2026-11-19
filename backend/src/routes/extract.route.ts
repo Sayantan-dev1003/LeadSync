@@ -47,19 +47,50 @@ router.post('/', requireAuth, upload.single('file'), async (req: Request, res: R
   res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
   res.flushHeaders();
 
-  let clientClosed = false;
-  req.on('close', () => {
-    clientClosed = true;
-  });
+  let clientDisconnected = false;
+  let isStreamFinished = false;
+
+  // Track premature client disconnection on the outgoing response and underlying socket.
+  // Note: req.on('close') fires when the request upload stream completes, which must NOT
+  // be mistaken for client disconnection from the active SSE response.
+  if (typeof res.on === 'function') {
+    res.on('close', () => {
+      if (!isStreamFinished && !res.writableEnded) {
+        clientDisconnected = true;
+      }
+    });
+
+    res.on('error', () => {
+      clientDisconnected = true;
+    });
+  }
+
+  if (res.socket && typeof res.socket.on === 'function') {
+    res.socket.on('close', () => {
+      if (!isStreamFinished && !res.writableEnded) {
+        clientDisconnected = true;
+      }
+    });
+  }
 
   let terminalEventSent = false;
 
-  const sendEvent = (event: SSEEvent): void => {
-    if (clientClosed) return;
-    res.write(`data: ${JSON.stringify(event)}\n\n`);
-    // Flush if available
-    if (typeof (res as unknown as { flush?: () => void }).flush === 'function') {
-      (res as unknown as { flush: () => void }).flush();
+  const canWriteToStream = (): boolean => {
+    return !clientDisconnected && !isStreamFinished && !res.writableEnded && res.writable;
+  };
+
+  const sendEvent = (event: SSEEvent): boolean => {
+    if (!canWriteToStream()) return false;
+    try {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+      // Flush if available
+      if (typeof (res as unknown as { flush?: () => void }).flush === 'function') {
+        (res as unknown as { flush: () => void }).flush();
+      }
+      return true;
+    } catch {
+      clientDisconnected = true;
+      return false;
     }
   };
 
@@ -67,10 +98,10 @@ router.post('/', requireAuth, upload.single('file'), async (req: Request, res: R
    * Send a terminal event exactly once. Prevents double-firing 'complete'
    * and 'error' if an error is thrown after the complete event was sent.
    */
-  const sendTerminalEvent = (event: SSEEvent): void => {
-    if (terminalEventSent || clientClosed) return;
+  const sendTerminalEvent = (event: SSEEvent): boolean => {
+    if (terminalEventSent || !canWriteToStream()) return false;
     terminalEventSent = true;
-    sendEvent(event);
+    return sendEvent(event);
   };
 
   const filename = req.file.originalname;
@@ -88,13 +119,12 @@ router.post('/', requireAuth, upload.single('file'), async (req: Request, res: R
 
     if (rows.length === 0) {
       sendTerminalEvent({ type: 'error', message: 'CSV file has no data rows to process' });
-      res.end();
       return;
     }
 
     // 2. Run AI extraction with streaming progress
     const { records, skipped, failed } = await orchestrateImport(rows, (event) => {
-      if (clientClosed) return;
+      if (!canWriteToStream()) return;
       if (event.type === 'progress') {
         allRecords.push(...event.batchRecords);
         allSkipped.push(...event.batchSkipped);
@@ -103,8 +133,7 @@ router.post('/', requireAuth, upload.single('file'), async (req: Request, res: R
       sendEvent(event);
     });
 
-    if (clientClosed) {
-      res.end();
+    if (!canWriteToStream()) {
       return;
     }
 
@@ -134,7 +163,6 @@ router.post('/', requireAuth, upload.single('file'), async (req: Request, res: R
         type: 'error',
         message: 'Failed to stage extracted leads for review. Please try again.',
       });
-      res.end();
       return;
     }
 
@@ -153,8 +181,11 @@ router.post('/', requireAuth, upload.single('file'), async (req: Request, res: R
     console.error('Extract pipeline error:', safeMessage);
     sendTerminalEvent({ type: 'error', message: safeMessage });
   } finally {
-    if (!clientClosed) {
-      res.end();
+    isStreamFinished = true;
+    if (!res.writableEnded && res.writable && !clientDisconnected) {
+      try {
+        res.end();
+      } catch {}
     }
   }
 });

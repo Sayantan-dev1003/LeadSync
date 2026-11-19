@@ -17,10 +17,35 @@ declare global {
   }
 }
 
-const AUTH_SECRET = process.env.AUTH_SECRET || process.env.JWT_SECRET || 'leadsync-default-hmac-sha256-secret-key-32chars';
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 
-// Deterministic fallback dev token for local DX
+/**
+ * Returns the authentication secret for token signing and verification.
+ * Fails safely in production if neither AUTH_SECRET nor JWT_SECRET is configured.
+ */
+export function getAuthSecret(): string {
+  const secret = process.env.AUTH_SECRET || process.env.JWT_SECRET;
+  if (!secret) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('FATAL: In production mode, AUTH_SECRET or JWT_SECRET must be configured.');
+    }
+    return 'leadsync-default-hmac-sha256-secret-key-32chars';
+  }
+  return secret;
+}
+
+/**
+ * Checks whether local development demo mode is explicitly enabled.
+ * Never allowed in production mode.
+ */
+export function isDevDemoAuthEnabled(): boolean {
+  return (
+    process.env.NODE_ENV !== 'production' &&
+    (process.env.ALLOW_DEV_ANONYMOUS === 'true' || process.env.ENABLE_DEV_DEMO_AUTH === 'true')
+  );
+}
+
+// Deterministic fallback dev user for explicitly enabled local DX demo mode
 export const DEFAULT_DEV_USER: AuthUser = {
   id: 'usr_dev_reviewer_01',
   role: 'reviewer',
@@ -34,6 +59,7 @@ export function generateToken(
   user: { id: string; role?: UserRole; email?: string },
   expiresInHours: number = 24
 ): string {
+  const secret = getAuthSecret();
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
   const payload = Buffer.from(
     JSON.stringify({
@@ -45,7 +71,7 @@ export function generateToken(
   ).toString('base64url');
 
   const signature = crypto
-    .createHmac('sha256', AUTH_SECRET)
+    .createHmac('sha256', secret)
     .update(`${header}.${payload}`)
     .digest('base64url');
 
@@ -53,7 +79,7 @@ export function generateToken(
 }
 
 /**
- * Verifies and decodes a token. Returns null if invalid or expired.
+ * Verifies and decodes a token. Returns null if invalid, expired, or signature mismatch.
  */
 export function verifyToken(token: string): AuthUser | null {
   if (!token || typeof token !== 'string') return null;
@@ -61,9 +87,16 @@ export function verifyToken(token: string): AuthUser | null {
   const parts = token.split('.');
   if (parts.length !== 3) return null;
 
+  let secret: string;
+  try {
+    secret = getAuthSecret();
+  } catch {
+    return null;
+  }
+
   const [header, payload, signature] = parts;
   const expectedSignature = crypto
-    .createHmac('sha256', AUTH_SECRET)
+    .createHmac('sha256', secret)
     .update(`${header}.${payload}`)
     .digest('base64url');
 
@@ -106,16 +139,21 @@ export function authenticate(req: Request, _res: Response, next: NextFunction): 
   // 2. Check Bearer token
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.slice(7).trim();
-    const verified = verifyToken(token);
-    if (verified) {
-      req.user = verified;
+    if (token) {
+      const verified = verifyToken(token);
+      if (verified) {
+        req.user = verified;
+      }
+      // If a Bearer token was provided, it must be genuinely valid.
+      // Do not fall back to dev demo user if an invalid/placeholder token was provided.
       next();
       return;
     }
   }
 
-  // 3. Allow anonymous dev fallback ONLY if explicitly opted in via ALLOW_DEV_ANONYMOUS=true
-  if (process.env.NODE_ENV !== 'production' && process.env.ALLOW_DEV_ANONYMOUS === 'true' && !authHeader && !apiKey) {
+  // 3. Allow anonymous dev fallback ONLY if explicitly opted in via isDevDemoAuthEnabled()
+  // and no credentials were supplied. Never allowed in production.
+  if (isDevDemoAuthEnabled() && !authHeader && !apiKey) {
     req.user = DEFAULT_DEV_USER;
   }
 

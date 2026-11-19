@@ -7,6 +7,8 @@ import {
   validateAIRow,
   validateAIBatch,
   AIExtractedRowSchema,
+  validateCRMRecord,
+  CRMRecordSchema,
 } from '../services/zodSchemas.service';
 
 const baseValidRow = {
@@ -323,5 +325,95 @@ describe('validateAIBatch — structural validation & length matching', () => {
     expect(results).toHaveLength(2);
     expect(results[0].success).toBe(true);
     expect(results[1].success).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dedicated Staged CRM Record Schema Validation
+// ---------------------------------------------------------------------------
+describe('validateCRMRecord — contract separation for staged CRM records', () => {
+  const baseValidCRMRecord = {
+    created_at: '2024-05-13T00:00:00.000Z',
+    name: 'Alice Smith',
+    email: 'alice@example.com',
+    country_code: '+91',
+    mobile_without_country_code: '9876543210',
+    company: 'Acme Corp',
+    city: 'Mumbai',
+    state: 'Maharashtra',
+    country: 'India',
+    lead_owner: 'Bob',
+    crm_status: 'GOOD_LEAD_FOLLOW_UP',
+    crm_note: 'Initial inquiry note',
+    data_source: 'eden_park',
+    possession_time: 'Dec 2025',
+    description: 'Looking for 3BHK',
+  };
+
+  it('accepts a valid normalized CRM record WITHOUT skip and skipReason', () => {
+    const result = validateCRMRecord(baseValidCRMRecord);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.email).toBe('alice@example.com');
+      expect((result.data as any).skip).toBeUndefined();
+      expect((result.data as any).skipReason).toBeUndefined();
+    }
+  });
+
+  it('rejects staged records that contain AI-only fields skip and skipReason (strict separation)', () => {
+    const recordWithAIFields = {
+      ...baseValidCRMRecord,
+      skip: false,
+      skipReason: null,
+    };
+    const result = validateCRMRecord(recordWithAIFields);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.errors.some((e) => e.message.includes('Unrecognized key'))).toBe(true);
+    }
+  });
+
+  it('rejects staged records with malformed email', () => {
+    const result = validateCRMRecord({ ...baseValidCRMRecord, email: 'invalid-email' });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects staged records with invalid dates', () => {
+    const result = validateCRMRecord({ ...baseValidCRMRecord, created_at: 'not-a-date' });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects staged records with invalid enum values', () => {
+    const result = validateCRMRecord({ ...baseValidCRMRecord, crm_status: 'INVALID_STATUS' });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects staged records with missing required contract keys', () => {
+    const { name: _omit, ...missingKey } = baseValidCRMRecord;
+    const result = validateCRMRecord(missingKey);
+    expect(result.success).toBe(false);
+  });
+
+  it('preserves existing safe normalization and allowed nullable values', () => {
+    const recordWithNulls = {
+      ...baseValidCRMRecord,
+      created_at: null,
+      company: null,
+      city: null,
+      state: null,
+      country: null,
+      lead_owner: null,
+      crm_note: null,
+      possession_time: null,
+      description: null,
+      crm_status: null,
+      data_source: null,
+    };
+    const result = validateCRMRecord(recordWithNulls);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.company).toBeNull();
+      expect(result.data.city).toBeNull();
+    }
   });
 });

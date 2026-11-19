@@ -126,9 +126,21 @@ function invokeRouter(
       resolve({ statusCode, body, rawWrites });
     };
 
+    const listeners: Record<string, Function[]> = {};
     const res: any = {
       statusCode: 200,
       headers: {},
+      writable: true,
+      writableEnded: false,
+      on(event: string, listener: Function) {
+        listeners[event] = listeners[event] || [];
+        listeners[event].push(listener);
+        return this;
+      },
+      emit(event: string, ...args: any[]) {
+        (listeners[event] || []).forEach((fn) => fn(...args));
+        return true;
+      },
       status(code: number) {
         this.statusCode = code;
         return this;
@@ -147,10 +159,15 @@ function invokeRouter(
       },
       flushHeaders: jest.fn(),
       write(chunk: any) {
-        rawWrites.push(chunk ? chunk.toString() : '');
+        if (!this.writableEnded) {
+          rawWrites.push(chunk ? chunk.toString() : '');
+        }
         return true;
       },
       end() {
+        this.writableEnded = true;
+        this.emit('finish');
+        this.emit('close');
         if (!resolved) {
           finish(this.statusCode, rawWrites.join(''));
         }
@@ -170,7 +187,7 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-const sampleValidRecord: any = {
+const sampleValidRecord: CRMRecord = {
   created_at: '2024-05-13T00:00:00.000Z',
   name: 'Rahul Sharma',
   email: 'rahul@example.com',
@@ -186,8 +203,6 @@ const sampleValidRecord: any = {
   data_source: 'eden_park',
   possession_time: 'Ready to move',
   description: null,
-  skip: false,
-  skipReason: null,
 };
 
 const sampleSkippedRow: SkippedRow = {
@@ -420,6 +435,38 @@ describe('Phase B: Human approval and commit', () => {
 
     expect(statusCode).toBe(422);
     expect(body.error).toMatch(/Invalid pending data/i);
+    expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('refuses to commit staged records containing AI-only fields (skip / skipReason) or unexpected keys', async () => {
+    const invalidPending = {
+      id: 'pending_unexpected_fields',
+      filename: 'sample.csv',
+      totalRows: 1,
+      status: 'PENDING',
+      records: [
+        {
+          ...sampleValidRecord,
+          skip: false,
+          skipReason: null,
+        },
+      ],
+      skipped: [],
+      failed: [],
+      expiresAt: new Date(Date.now() + 86400000),
+      committedImportId: null,
+    };
+
+    mockPrisma.pendingImport.findUnique.mockResolvedValue(invalidPending);
+
+    const { statusCode, body } = await invokeRouter(importsRouter, {
+      method: 'POST',
+      url: '/pending_unexpected_fields/approve',
+    });
+
+    expect(statusCode).toBe(422);
+    expect(body.error).toMatch(/Invalid pending data at record 1/i);
+    expect(body.error).toMatch(/Unrecognized key/i);
     expect(mockPrisma.$transaction).not.toHaveBeenCalled();
   });
 
@@ -690,5 +737,328 @@ describe('Phase D: Security & Access Control', () => {
 
     expect(statusCode).toBe(200);
     expect(body.pendingImport.id).toBe('pending_admin_ok');
+  });
+});
+
+// ============================================================================
+// Phase C: Real End-to-End Contract Integration Test (Extraction -> Staging -> Approval)
+// ============================================================================
+describe('Phase C: Real Data Contract Integration (Extraction -> Staging -> Approval)', () => {
+  it('real workflow contract: extraction stages CRM records without AI skip fields, and approval commits them', async () => {
+    // 1. Simulate extraction
+    let stagedPendingImport: any = null;
+
+    mockPrisma.pendingImport.create.mockImplementation(async (args: any) => {
+      stagedPendingImport = {
+        id: 'pending_contract_test_1',
+        ...args.data,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        committedImportId: null,
+      };
+      return stagedPendingImport;
+    });
+
+    mockOrchestrateImport.mockImplementation(async (_rows, onEvent) => {
+      onEvent({
+        type: 'progress',
+        batchIndex: 1,
+        totalBatches: 1,
+        batchRecords: [sampleValidRecord], // CRMRecord WITHOUT skip/skipReason
+        batchSkipped: [],
+        batchFailed: [],
+      });
+      return {
+        records: [sampleValidRecord],
+        skipped: [],
+        failed: [],
+      };
+    });
+
+    const csvContent = 'Name,Email,Phone\nRahul Sharma,rahul@example.com,9876543210\n';
+    const extractRes = await invokeRouter(extractRouter, {
+      method: 'POST',
+      url: '/',
+      file: {
+        originalname: 'leads.csv',
+        buffer: Buffer.from(csvContent),
+        mimetype: 'text/csv',
+      },
+    });
+
+    expect(extractRes.statusCode).toBe(200);
+    expect(mockPrisma.pendingImport.create).toHaveBeenCalledTimes(1);
+
+    // Verify staged records in PendingImport DO NOT have AI-only skip and skipReason
+    const stagedRecords = stagedPendingImport.records;
+    expect(stagedRecords).toHaveLength(1);
+    expect(stagedRecords[0].skip).toBeUndefined();
+    expect(stagedRecords[0].skipReason).toBeUndefined();
+    expect(stagedRecords[0].name).toBe('Rahul Sharma');
+    expect(stagedRecords[0].email).toBe('rahul@example.com');
+
+    // 2. Simulate human approval of the staged pending import
+    mockPrisma.pendingImport.findUnique.mockResolvedValue(stagedPendingImport);
+
+    const createdFinalImport = {
+      id: 'import_committed_real_contract',
+      filename: 'leads.csv',
+      totalRows: 1,
+      totalImported: 1,
+      totalSkipped: 0,
+    };
+
+    mockPrisma.$transaction.mockImplementation(async (callback: any) => {
+      const tx = {
+        pendingImport: {
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+          update: jest.fn().mockResolvedValue({}),
+          findUnique: jest.fn(),
+        },
+        import: {
+          create: jest.fn().mockResolvedValue(createdFinalImport),
+        },
+      };
+      return callback(tx);
+    });
+
+    const approveRes = await invokeRouter(importsRouter, {
+      method: 'POST',
+      url: '/pending_contract_test_1/approve',
+    });
+
+    expect(approveRes.statusCode).toBe(200);
+    expect(approveRes.body.success).toBe(true);
+    expect(approveRes.body.importId).toBe('import_committed_real_contract');
+    expect(approveRes.body.totalImported).toBe(1);
+  });
+
+  it('proves rejection creates zero final CRM leads and purges staged data', async () => {
+    const pendingToReject = {
+      id: 'pending_reject_verify',
+      filename: 'leads.csv',
+      totalRows: 1,
+      status: 'PENDING',
+      records: [sampleValidRecord],
+      skipped: [],
+      failed: [],
+      expiresAt: new Date(Date.now() + 86400000),
+      committedImportId: null,
+    };
+
+    mockPrisma.pendingImport.findUnique.mockResolvedValue(pendingToReject);
+    mockPrisma.pendingImport.updateMany.mockResolvedValue({ count: 1 });
+
+    const rejectRes = await invokeRouter(importsRouter, {
+      method: 'POST',
+      url: '/pending_reject_verify/reject',
+    });
+
+    expect(rejectRes.statusCode).toBe(200);
+    expect(rejectRes.body.success).toBe(true);
+    expect(rejectRes.body.status).toBe('REJECTED');
+
+    // Verify zero writes occurred to final CRM tables
+    expect(mockPrisma.import.create).not.toHaveBeenCalled();
+    expect(mockPrisma.lead.create).not.toHaveBeenCalled();
+
+    // Verify updateMany purged staged records and marked REJECTED
+    const updateCall = mockPrisma.pendingImport.updateMany.mock.calls[0][0];
+    expect(updateCall.data.status).toBe('REJECTED');
+    expect(updateCall.data.records).toEqual([]);
+    expect(updateCall.data.skipped).toEqual([]);
+    expect(updateCall.data.failed).toEqual([]);
+  });
+});
+
+// ============================================================================
+// Phase D: Authentication & Authorization Requirements
+// ============================================================================
+describe('Phase D: Authentication Middleware & Integration', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  afterAll(() => {
+    process.env = originalEnv;
+  });
+
+  it('rejects placeholder Bearer tokens (e.g. demo-reviewer-token) with 401', async () => {
+    const { statusCode, body } = await invokeRouter(importsRouter, {
+      method: 'GET',
+      url: '/pending/some_id',
+      headers: { authorization: 'Bearer demo-reviewer-token' },
+    });
+
+    expect(statusCode).toBe(401);
+    expect(body.error).toMatch(/Authentication required/i);
+  });
+
+  it('rejects malformed tokens or tokens with invalid signatures with 401', async () => {
+    const { statusCode, body } = await invokeRouter(importsRouter, {
+      method: 'GET',
+      url: '/pending/some_id',
+      headers: { authorization: 'Bearer not.a.validtoken' },
+    });
+
+    expect(statusCode).toBe(401);
+    expect(body.error).toMatch(/Authentication required/i);
+  });
+
+  it('rejects expired tokens with 401', async () => {
+    // Generate a token that expired 1 hour ago
+    const expiredToken = generateToken({ id: 'user_exp', role: 'user' }, -1);
+    const { statusCode, body } = await invokeRouter(importsRouter, {
+      method: 'GET',
+      url: '/pending/some_id',
+      headers: { authorization: `Bearer ${expiredToken}` },
+    });
+
+    expect(statusCode).toBe(401);
+    expect(body.error).toMatch(/Authentication required/i);
+  });
+
+  it('allows unauthenticated requests in local development ONLY when ALLOW_DEV_ANONYMOUS=true', async () => {
+    process.env.NODE_ENV = 'development';
+    process.env.ALLOW_DEV_ANONYMOUS = 'true';
+
+    const pendingData = {
+      id: 'pending_dev_ok',
+      userId: null,
+      filename: 'sample.csv',
+      totalRows: 1,
+      status: 'PENDING',
+      records: [sampleValidRecord],
+      skipped: [],
+      failed: [],
+      expiresAt: new Date(Date.now() + 86400000),
+      committedImportId: null,
+    };
+
+    mockPrisma.pendingImport.findUnique.mockResolvedValue(pendingData);
+
+    const { statusCode, body } = await invokeRouter(importsRouter, {
+      method: 'GET',
+      url: '/pending/pending_dev_ok',
+      headers: {}, // No Authorization header
+    });
+
+    expect(statusCode).toBe(200);
+    expect(body.pendingImport.id).toBe('pending_dev_ok');
+  });
+
+  it('NEVER allows development authentication bypass in production mode', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.AUTH_SECRET = 'test-prod-secret-key-that-is-at-least-32-chars-long';
+    process.env.ALLOW_DEV_ANONYMOUS = 'true'; // Attempt to bypass in production!
+
+    const { statusCode, body } = await invokeRouter(importsRouter, {
+      method: 'GET',
+      url: '/pending/pending_prod_check',
+      headers: {},
+    });
+
+    expect(statusCode).toBe(401);
+    expect(body.error).toMatch(/Authentication required/i);
+  });
+
+  it('fails safely in production mode if required AUTH_SECRET / JWT_SECRET is missing', () => {
+    process.env.NODE_ENV = 'production';
+    delete process.env.AUTH_SECRET;
+    delete process.env.JWT_SECRET;
+
+    const { getAuthSecret } = require('../middleware/auth.middleware');
+    expect(() => getAuthSecret()).toThrow(/In production mode, AUTH_SECRET or JWT_SECRET must be configured/i);
+  });
+});
+
+// ============================================================================
+// Phase E: SSE Stream Connection Handling & Lifecycle
+// ============================================================================
+describe('Phase E: SSE Connection Handling & Lifecycle', () => {
+  it('delivers normal upload followed by multiple progress events and one terminal complete event', async () => {
+    const csvContent = 'Name,Email,Phone\nRahul Sharma,rahul@example.com,9876543210\n';
+
+    mockOrchestrateImport.mockImplementation(async (_rows, onEvent) => {
+      onEvent({
+        type: 'progress',
+        batchIndex: 1,
+        totalBatches: 2,
+        batchRecords: [sampleValidRecord],
+        batchSkipped: [],
+        batchFailed: [],
+      });
+      onEvent({
+        type: 'progress',
+        batchIndex: 2,
+        totalBatches: 2,
+        batchRecords: [],
+        batchSkipped: [sampleSkippedRow],
+        batchFailed: [],
+      });
+      return {
+        records: [sampleValidRecord],
+        skipped: [sampleSkippedRow],
+        failed: [],
+      };
+    });
+
+    mockPrisma.pendingImport.create.mockResolvedValue({
+      id: 'pending_sse_1',
+      filename: 'leads.csv',
+      totalRows: 2,
+      status: 'PENDING',
+      records: [sampleValidRecord],
+      skipped: [sampleSkippedRow],
+      failed: [],
+      expiresAt: new Date(Date.now() + 86400000),
+    });
+
+    const { statusCode, rawWrites } = await invokeRouter(extractRouter, {
+      method: 'POST',
+      url: '/',
+      file: {
+        originalname: 'leads.csv',
+        buffer: Buffer.from(csvContent),
+        mimetype: 'text/csv',
+      },
+    });
+
+    expect(statusCode).toBe(200);
+
+    const bodyText = rawWrites.join('');
+    // Progress events
+    expect(bodyText).toContain('"type":"progress","batchIndex":1');
+    expect(bodyText).toContain('"type":"progress","batchIndex":2');
+    // Exactly one complete event
+    const completeMatches = bodyText.match(/"type":"complete"/g);
+    expect(completeMatches).toHaveLength(1);
+    expect(bodyText).toContain('"pendingImportId":"pending_sse_1"');
+    expect(bodyText).toContain('"totalImported":0');
+  });
+
+  it('sends exactly one terminal error event on unrecoverable extraction failure', async () => {
+    const csvContent = 'Name,Email\nTest,test@example.com\n';
+
+    mockOrchestrateImport.mockRejectedValue(new Error('AI Service Unavailable'));
+
+    const { statusCode, rawWrites } = await invokeRouter(extractRouter, {
+      method: 'POST',
+      url: '/',
+      file: {
+        originalname: 'test.csv',
+        buffer: Buffer.from(csvContent),
+        mimetype: 'text/csv',
+      },
+    });
+
+    expect(statusCode).toBe(200);
+    const bodyText = rawWrites.join('');
+    const errorMatches = bodyText.match(/"type":"error"/g);
+    expect(errorMatches).toHaveLength(1);
+    expect(bodyText).toContain('AI Service Unavailable');
+    expect(bodyText).not.toContain('"type":"complete"');
   });
 });

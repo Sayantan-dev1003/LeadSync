@@ -302,7 +302,8 @@ describe('Human-in-the-loop approval API functions', () => {
     );
   });
 
-  it('getPendingImport sends GET and returns pending import metadata', async () => {
+  it('getPendingImport sends GET and returns pending import metadata with auth headers when token present', async () => {
+    localStorage.setItem('leadsync_auth_token', 'valid-jwt-token-123');
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -325,8 +326,36 @@ describe('Human-in-the-loop approval API functions', () => {
       expect.stringContaining('/api/imports/pending/pending_1'),
       expect.objectContaining({
         headers: expect.objectContaining({
-          Authorization: expect.any(String),
+          Authorization: 'Bearer valid-jwt-token-123',
         }),
+      })
+    );
+    localStorage.removeItem('leadsync_auth_token');
+  });
+
+  it('omits Authorization header when no auth token is stored (no placeholder token used)', async () => {
+    localStorage.removeItem('leadsync_auth_token');
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        pendingImport: {
+          id: 'pending_2',
+          filename: 'leads2.csv',
+          totalRows: 1,
+          status: 'PENDING',
+          records: [],
+          skipped: [],
+          failed: [],
+        },
+      }),
+    });
+
+    const result = await getPendingImport('pending_2');
+    expect(result.id).toBe('pending_2');
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/imports/pending/pending_2'),
+      expect.objectContaining({
+        headers: {},
       })
     );
   });

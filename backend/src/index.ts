@@ -2,7 +2,7 @@ import 'dotenv/config';
 import 'express-async-errors';
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
-import { authenticate } from './middleware/auth.middleware';
+import { authenticate, isDevDemoAuthEnabled, generateToken, DEFAULT_DEV_USER } from './middleware/auth.middleware';
 import { sanitizeLogMessage } from './lib/sanitizer';
 import parseRouter from './routes/parse.route';
 import extractRouter from './routes/extract.route';
@@ -29,6 +29,17 @@ app.use(authenticate);
 // --- Health check ---
 app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// --- Dev Demo Token Endpoint ---
+// Isolated endpoint strictly available in non-production mode when demo auth is enabled
+app.get('/api/auth/demo-token', (_req: Request, res: Response) => {
+  if (!isDevDemoAuthEnabled()) {
+    res.status(404).json({ error: 'Dev demo authentication is disabled' });
+    return;
+  }
+  const token = generateToken(DEFAULT_DEV_USER);
+  res.json({ token, user: DEFAULT_DEV_USER });
 });
 
 // --- Routes ---
