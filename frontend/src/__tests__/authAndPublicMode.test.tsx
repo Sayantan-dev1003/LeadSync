@@ -21,7 +21,6 @@ jest.mock('../lib/api', () => ({
   approvePendingImport: jest.fn(),
   rejectPendingImport: jest.fn(),
   getPendingImport: jest.fn(),
-  getAuthHeaders: () => ({}),
 }));
 
 describe('Phase 3 & Phase 6: Authentication & Public Empty Read-Only Mode', () => {

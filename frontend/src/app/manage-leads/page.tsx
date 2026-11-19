@@ -5,7 +5,6 @@ export const dynamic = 'force-dynamic';
 import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { Search, RefreshCw, Inbox, Lock } from 'lucide-react';
-import { getAuthHeaders } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 
 const BACKEND_URL =
@@ -68,7 +67,6 @@ function ManageLeadsContent() {
 
       const res = await fetch(url, {
         credentials: 'include',
-        headers: getAuthHeaders(),
       });
 
       if (res.ok) {
@@ -82,7 +80,6 @@ function ManageLeadsContent() {
         // Fetch stats
         const statsRes = await fetch(`${BACKEND_URL}/api/imports/${importId}`, {
           credentials: 'include',
-          headers: getAuthHeaders(),
         });
         if (statsRes.ok) {
           const statsData = await statsRes.json();
@@ -93,7 +90,6 @@ function ManageLeadsContent() {
         if (activeTab === 'skipped') {
           const skipRes = await fetch(`${BACKEND_URL}/api/imports/${importId}/skipped`, {
             credentials: 'include',
-            headers: getAuthHeaders(),
           });
           if (skipRes.ok) {
             const skipData = await skipRes.json();

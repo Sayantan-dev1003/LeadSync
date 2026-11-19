@@ -106,3 +106,16 @@ model Session {
   @@index([expiresAt])
   @@map("sessions")
 }
+
+model OAuthState {
+  id           String   @id @default(cuid())
+  state        String   @unique
+  nonce        String
+  codeVerifier String
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@index([state])
+  @@index([expiresAt])
+  @@map("oauth_states")
+}

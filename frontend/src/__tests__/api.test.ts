@@ -302,8 +302,7 @@ describe('Human-in-the-loop approval API functions', () => {
     );
   });
 
-  it('getPendingImport sends GET and returns pending import metadata with auth headers when token present', async () => {
-    localStorage.setItem('leadsync_auth_token', 'valid-jwt-token-123');
+  it('getPendingImport sends GET with credentials: include and returns pending import metadata', async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -325,16 +324,12 @@ describe('Human-in-the-loop approval API functions', () => {
     expect(global.fetch).toHaveBeenCalledWith(
       expect.stringContaining('/api/imports/pending/pending_1'),
       expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer valid-jwt-token-123',
-        }),
+        credentials: 'include',
       })
     );
-    localStorage.removeItem('leadsync_auth_token');
   });
 
-  it('omits Authorization header when no auth token is stored (no placeholder token used)', async () => {
-    localStorage.removeItem('leadsync_auth_token');
+  it('omits Authorization header and relies on session cookies', async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -352,11 +347,9 @@ describe('Human-in-the-loop approval API functions', () => {
 
     const result = await getPendingImport('pending_2');
     expect(result.id).toBe('pending_2');
-    expect(global.fetch).toHaveBeenCalledWith(
-      expect.stringContaining('/api/imports/pending/pending_2'),
-      expect.objectContaining({
-        headers: {},
-      })
-    );
+    const callArgs = (global.fetch as jest.Mock).mock.calls[0];
+    const fetchOptions = callArgs[1] || {};
+    expect(fetchOptions.credentials).toBe('include');
+    expect(fetchOptions.headers?.Authorization).toBeUndefined();
   });
 });

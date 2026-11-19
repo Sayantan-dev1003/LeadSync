@@ -61,7 +61,7 @@ CSV Upload ➔ Gemini AI Extraction ➔ Strict Zod Validation ➔ Staging (pendi
 │  └───────────────────────┘   └──────────────────────────┘   └───────────────────┘  │   │
 │                                                                                    │   │
 │  ┌──────────────────────────────────────────────────────────────────────────────┐  │   │
-│  │ Phase B: POST /api/imports/:id/approve (Protected by HMAC-SHA256 Auth & RBAC)│  │   │
+│  │ Phase B: POST /api/imports/:id/approve (Protected by Single-Owner Session)   │  │   │
 │  │   1. Atomic conditional update: status: 'PENDING' -> 'APPROVED'              │  │   │
 │  │   2. Server-side strict Zod revalidation                                     │  │   │
 │  │   3. Atomic transaction (Prisma $transaction):                               │  │   │
@@ -73,7 +73,7 @@ CSV Upload ➔ Gemini AI Extraction ➔ Strict Zod Validation ➔ Staging (pendi
 │  └──────────────────────────────────────────────────────────────────────────────┘  │   │
 │                                                                                    │   │
 │  ┌──────────────────────────────────────────────────────────────────────────────┐  │   │
-│  │ Phase C: POST /api/imports/:id/reject (Protected by HMAC-SHA256 Auth & RBAC) │  │   │
+│  │ Phase C: POST /api/imports/:id/reject (Protected by Single-Owner Session)    │  │   │
 │  │   1. Atomic conditional update: status: 'PENDING' -> 'REJECTED'              │◀─┘   │
 │  │   2. Purge staged records, skipped, and failed JSON (PII defense)            │      │
 │  │   3. Idempotent return for duplicate rejection requests                      │      │
@@ -141,25 +141,34 @@ The application implements defense-in-depth data validation using Zod:
 - **24-Hour TTL**: Pending imports automatically expire after 24 hours (`expiresAt = now + 24h`). Expired imports cannot be approved.
 - **Automated Retention Cleanup**: `cleanupExpiredPendingImports()` service and `POST /api/imports/cleanup` endpoint periodically purge staged PII for expired imports and delete stale pending imports older than 7 days. Completed CRM records in `leads` are never touched by cleanup.
 
-### Authentication & Role-Based Access Control (RBAC)
-- **HMAC-SHA256 Token Verification**: Stateless, cryptographically signed tokens (`backend/src/middleware/auth.middleware.ts`) protect pending import review, approval, rejection, and lead management endpoints.
-- **Role Hierarchy**:
-  - `admin`: Full access to extraction, review, approval, rejection, and retention cleanup.
-  - `reviewer`: Access to review, approve, and reject imports assigned to them or unassigned.
-  - `user`: Restricted to viewing own imports.
-- **Ownership Verification (`isAuthorizedForPendingImport`)**: Pending imports are associated with a `userId`. Non-admin users cannot review, approve, or reject imports belonging to another user.
-- **Request Headers**:
-  - `Authorization: Bearer <token>`
-  - Or `x-api-key: <api-key>`
-- **Development Fallback**: In local development, `ALLOW_DEV_ANONYMOUS=true` allows unauthenticated requests with a default developer reviewer identity.
+### Single-Owner Google OAuth Authentication & Authorization
+LeadSync is architected as a single-owner portfolio application with strict owner-only authorization and a clean, empty public read-only mode.
 
-> [!NOTE]
-> **Production Security Note**: For enterprise multi-tenant deployments, pair this HMAC-SHA256 middleware with an OAuth2 / OIDC identity provider (e.g. Auth0, Clerk, or Supabase Auth) and manage cryptographic keys via a KMS / Secrets Manager.
+- **Google OAuth 2.0 / OpenID Connect**: Uses Google's official authorization code flow with:
+  - **PKCE (`code_verifier` / `code_challenge: S256`)** for authorization code security.
+  - **Exact Nonce Verification**: Nonces generated during login initiation are cryptographically validated against the returned Google ID token.
+  - **Durable OAuth State Store**: State, nonce, and PKCE verifier are stored in signed `HttpOnly` cookies (`leadsync_oauth_state`) and backed by the PostgreSQL `OAuthState` model, persisting seamlessly across server restarts or load balancers.
+  - Required Scopes: `openid email profile`.
+- **Single-Owner Identity Pinning**:
+  - `OWNER_GOOGLE_EMAIL`: The allowlisted owner email address (case-insensitive).
+  - `OWNER_GOOGLE_SUB` (Optional): Google subject identifier for cryptographic identity pinning.
+  - Any unauthorized Google account is strictly rejected with HTTP `403` and redirected to an unauthorized error state without creating a session.
+- **Server-Side Session Management**:
+  - Sessions are managed server-side via PostgreSQL (`Session` model) using cryptographically random 256-bit opaque tokens.
+  - Sessions are transmitted exclusively via `HttpOnly`, `SameSite=Lax`, `Secure` (in production) cookies (`leadsync_session`).
+  - No session secrets or JWTs are stored in `localStorage` or exposed in client-side code.
+- **Empty Public Read-Only Mode**:
+  - Unauthenticated visitors can browse the portfolio UI, view empty statistics (zero leads/imports), and observe the human-in-the-loop workflow.
+  - **Zero Synthetic Records**: No mock, seeded, or synthetic CRM records are displayed publicly.
+  - CSV upload, Gemini AI extraction, pending review, approval/rejection, and lead modifications strictly require the verified owner session.
+- **CSRF Protection**:
+  - State-changing requests (`POST`, `PUT`, `DELETE`) are verified against allowed frontend origins (`APP_ORIGIN`, `FRONTEND_URL`, localhost).
 
 ---
 
 ## 🖥️ Frontend UX & Human Review Screen
 
+- **Navbar Google Sign-In**: Unauthenticated visitors see a standard "Sign in with Google" button. Authenticated owners see their Google profile avatar, display name, and a sign-out dropdown.
 - **SSE Stream Integrity**: `CSVImporter.tsx` verifies receipt of a valid `pendingImportId` before transitioning to the review step. Malformed or failed extractions show a recoverable error alert instead of a blank review screen.
 - **No Premature Navigation**: Navigation to `/manage-leads` occurs **only** after human approval is confirmed by the backend database transaction.
 - **Double-Click Protection**: Approval and rejection buttons disable immediately with loading states to prevent race conditions or repeated submissions.
@@ -172,33 +181,58 @@ The application implements defense-in-depth data validation using Zod:
 
 ## 📡 API Reference
 
-### 1. `POST /api/extract`
+### Authentication Endpoints
+
+#### 1. `GET /api/auth/google`
+Initiates Google OAuth 2.0 flow with PKCE code challenge and durable signed state/nonce.
+- **Response**: `302 Redirect` to Google Accounts login.
+
+#### 2. `GET /api/auth/google/callback`
+Validates OAuth authorization code, verifies PKCE code verifier and exact nonce, inspects ID token signature, enforces single-owner allowlist, and sets `leadsync_session` cookie.
+- **Response**: `302 Redirect` to frontend (or error redirect with `?auth_error=unauthorized`).
+
+#### 3. `GET /api/auth/me`
+Returns authenticated owner session status.
+- **Response**: `200 OK` with `{ authenticated: true, user: { email, name, picture } }` or `{ authenticated: false, user: null }`.
+
+#### 4. `POST /api/auth/logout`
+Revokes active session in PostgreSQL and clears cookies.
+- **Response**: `200 OK` with `{ success: true }`.
+
+### Protected CRM Endpoints (Owner-Only)
+
+#### 5. `POST /api/extract`
 Uploads a CSV file and streams AI extraction results via Server-Sent Events (SSE).
-- **Headers**: `Authorization: Bearer <token>`, `Content-Type: multipart/form-data`
-- **Body**: `file`: CSV file
+- **Cookie**: `leadsync_session`
+- **Body**: `file`: CSV file (multipart/form-data)
 - **SSE Events**:
   - `progress`: `{ type: 'progress', batchIndex, totalBatches, batchRecords, batchSkipped, batchFailed }`
   - `complete`: `{ type: 'complete', pendingImportId, totalValid, totalSkipped, totalFailed }`
   - `error`: `{ type: 'error', message }`
 
-### 2. `GET /api/imports/pending/:id`
+#### 6. `GET /api/imports/pending/:id`
 Retrieves a pending import by ID for review.
-- **Headers**: `Authorization: Bearer <token>`
+- **Cookie**: `leadsync_session`
 - **Response**: `200 OK` with `PendingImportDTO`
 
-### 3. `POST /api/imports/:id/approve`
+#### 7. `POST /api/imports/:id/approve`
 Approves and commits a pending import into PostgreSQL tables (`imports`, `leads`, `skipped_rows`).
-- **Headers**: `Authorization: Bearer <token>`
+- **Cookie**: `leadsync_session`
 - **Response**: `200 OK` with `{ message, importId, totalImported, totalSkipped }`
 
-### 4. `POST /api/imports/:id/reject`
+#### 8. `POST /api/imports/:id/reject`
 Rejects a pending import and purges staged PII.
-- **Headers**: `Authorization: Bearer <token>`
+- **Cookie**: `leadsync_session`
 - **Response**: `200 OK` with `{ message, pendingImportId, status: 'REJECTED' }`
 
-### 5. `POST /api/imports/cleanup`
-Admin maintenance endpoint to clean up expired pending imports and purge staged PII.
-- **Headers**: `Authorization: Bearer <admin-token>`
+#### 9. `GET /api/leads`
+Retrieves CRM leads with search, pagination, and sorting.
+- **Cookie**: `leadsync_session`
+- **Response**: `200 OK` with `{ leads, total, page, pageSize }`
+
+#### 10. `POST /api/imports/cleanup`
+Maintenance endpoint to clean up expired pending imports and purge staged PII.
+- **Cookie**: `leadsync_session`
 - **Response**: `200 OK` with `{ message, purgedCount, deletedCount }`
 
 ---
@@ -244,7 +278,7 @@ cd LeadSync
 ```bash
 cd backend
 cp .env.example .env
-# Edit .env with your DATABASE_URL, GEMINI_API_KEY, and JWT_SECRET
+# Edit .env with your DATABASE_URL, GEMINI_API_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and OWNER_GOOGLE_EMAIL
 npm ci
 npx prisma generate
 npx prisma migrate deploy
@@ -282,14 +316,14 @@ docker-compose up --build -d
 ```bash
 cd backend
 npm test
-# 110 tests passing across 6 suites (zodSchemas, aiExtractor, approvalWorkflow, csvParser, validators, importOrchestrator)
+# 145 tests passing across 7 suites (auth, zodSchemas, aiExtractor, approvalWorkflow, csvParser, validators, importOrchestrator)
 ```
 
 ### Run Frontend Tests
 ```bash
 cd frontend
 npm test
-# 34 tests passing across 3 suites (CSVImporterWorkflow, api, utils)
+# 44 tests passing across 4 suites (authAndPublicMode, CSVImporterWorkflow, api, utils)
 ```
 
 ### Build Verification
@@ -308,11 +342,16 @@ cd ../frontend && npm run build # Next.js webpack build
 |---|---|---|---|
 | `DATABASE_URL` | **Yes** | — | PostgreSQL connection string |
 | `GEMINI_API_KEY` | **Yes** | — | Google Gemini API key |
+| `GOOGLE_CLIENT_ID` | **Yes** | — | Google OAuth 2.0 Web Client ID |
+| `GOOGLE_CLIENT_SECRET` | **Yes** | — | Google OAuth 2.0 Client Secret |
+| `GOOGLE_REDIRECT_URI` | **Yes** | `http://localhost:3000/api/auth/google/callback` | OAuth redirect URI |
+| `OWNER_GOOGLE_EMAIL` | **Yes** | — | Configured owner Google email address |
+| `OWNER_GOOGLE_SUB` | No | — | Optional Google subject ID pinning |
+| `SESSION_SECRET` | **Yes** | — | Secret for signing OAuth cookies (min 32 chars) |
+| `APP_ORIGIN` | No | `http://localhost:3000` | Allowed frontend origin for CSRF & cookies |
+| `FRONTEND_URL` | No | `http://localhost:3000` | Frontend redirect destination |
 | `GEMINI_MODEL` | No | `gemini-2.5-flash` | Gemini model name |
 | `PORT` | No | `4000` | Server listening port |
-| `JWT_SECRET` | No | Random dev string | HMAC-SHA256 token verification key |
-| `API_KEY` | No | — | Optional service API key |
-| `ALLOW_DEV_ANONYMOUS`| No | `false` | Allow unauthenticated dev requests |
 | `PENDING_IMPORT_TTL_HOURS`| No | `24` | Hours before pending import expires |
 | `BATCH_SIZE` | No | `20` | Row count per AI batch |
 | `BATCH_CONCURRENCY` | No | `3` | Concurrent AI requests |
@@ -322,8 +361,8 @@ cd ../frontend && npm run build # Next.js webpack build
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `NEXT_PUBLIC_BACKEND_URL` | **Yes** | `http://localhost:4000` | Backend API URL |
-| `NEXT_PUBLIC_API_TOKEN` | No | `demo-reviewer-token` | Default reviewer token |
+| `BACKEND_PROXY_URL` | **Yes** | `http://localhost:4000` | Backend API URL for server-side Next.js rewrites |
+| `NEXT_PUBLIC_BACKEND_URL` | No | `""` (relative `/api/*`) | Optional browser API URL override |
 
 ---
 
@@ -339,6 +378,6 @@ Four test datasets are available in `/samples/`:
 
 ## 📝 Known Limitations & Production Considerations
 
-- **Multi-Tenant Identity**: Uses HMAC-SHA256 token verification. In a large enterprise environment, integrate directly with an identity provider (Auth0, Okta, Supabase Auth).
+- **Single-Owner Application**: LeadSync is designed specifically as a single-owner portfolio application with owner-only privileges and empty public read-only mode for portfolio visitors.
 - **Gemini Rate Limits**: On the free tier, Gemini API has request-per-minute limits. Production deployments with large CSVs (>1,000 rows) should utilize a paid tier key.
 - **Ambiguous Data Source**: The AI intentionally abstains from guessing CRM data source if the CSV does not contain clear project signals.

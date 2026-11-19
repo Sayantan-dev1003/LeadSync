@@ -6,16 +6,17 @@ import { parseCookies } from '../middleware/auth.middleware';
 
 const router = Router();
 
-// --- OAuth state/nonce store with TTL cleanup ---
-export interface OAuthStateEntry {
-  nonce: string;
-  createdAt: number;
-}
-
-export const oauthStateMap = new Map<string, OAuthStateEntry>();
 export const STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
-export function cleanupExpiredStates(): void {
+// In-memory fallback map (in addition to durable signed cookie and database storage)
+export interface OAuthStateEntry {
+  nonce: string;
+  codeVerifier: string;
+  createdAt: number;
+}
+export const oauthStateMap = new Map<string, OAuthStateEntry>();
+
+function cleanupExpiredMemoryStates(): void {
   const now = Date.now();
   for (const [key, entry] of oauthStateMap) {
     if (now - entry.createdAt > STATE_TTL_MS) {
@@ -24,10 +25,9 @@ export function cleanupExpiredStates(): void {
   }
 }
 
-// Run cleanup every 5 minutes
-const cleanupInterval = setInterval(cleanupExpiredStates, 5 * 60 * 1000);
-if (cleanupInterval.unref) {
-  cleanupInterval.unref();
+const memoryCleanupInterval = setInterval(cleanupExpiredMemoryStates, 5 * 60 * 1000);
+if (memoryCleanupInterval.unref) {
+  memoryCleanupInterval.unref();
 }
 
 // --- Environment helpers ---
@@ -57,7 +57,17 @@ export function getOwnerEmail(): string {
   return email;
 }
 
-// Exportable OAuth2 client factory for easy mocking in unit tests
+export function getSessionSecret(): string {
+  const secret = process.env.SESSION_SECRET || process.env.AUTH_SECRET || process.env.JWT_SECRET;
+  if (!secret) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('FATAL: In production mode, SESSION_SECRET must be configured.');
+    }
+    return 'leadsync-default-hmac-sha256-secret-key-32chars';
+  }
+  return secret;
+}
+
 export function createOAuth2Client(): OAuth2Client {
   return new OAuth2Client({
     clientId: getGoogleClientId(),
@@ -66,21 +76,186 @@ export function createOAuth2Client(): OAuth2Client {
   });
 }
 
+/**
+ * Signs OAuth state payload for durable, stateless cookie persistence
+ * across server restarts and horizontally scaled backend instances.
+ */
+export function signOAuthCookiePayload(payload: {
+  state: string;
+  nonce: string;
+  codeVerifier: string;
+  exp: number;
+}): string {
+  const secret = getSessionSecret();
+  const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', secret).update(data).digest('base64url');
+  return `${data}.${sig}`;
+}
+
+export function verifyOAuthCookiePayload(cookieVal: string): {
+  state: string;
+  nonce: string;
+  codeVerifier: string;
+  exp: number;
+} | null {
+  if (!cookieVal || !cookieVal.includes('.')) return null;
+  const [data, sig] = cookieVal.split('.');
+  if (!data || !sig) return null;
+
+  const secret = getSessionSecret();
+  const expectedSig = crypto.createHmac('sha256', secret).update(data).digest('base64url');
+
+  if (sig.length !== expectedSig.length) return null;
+  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) return null;
+
+  try {
+    const parsed = JSON.parse(Buffer.from(data, 'base64url').toString('utf8'));
+    if (!parsed.state || !parsed.nonce || !parsed.codeVerifier || !parsed.exp) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Saves OAuth state durably across database, signed HttpOnly cookie, and in-memory cache.
+ */
+export async function persistOAuthState(
+  res: Response,
+  entry: { state: string; nonce: string; codeVerifier: string }
+): Promise<void> {
+  const exp = Date.now() + STATE_TTL_MS;
+
+  // 1. In-memory cache
+  oauthStateMap.set(entry.state, {
+    nonce: entry.nonce,
+    codeVerifier: entry.codeVerifier,
+    createdAt: Date.now(),
+  });
+
+  // 2. Durable Signed HttpOnly Cookie (survives backend restarts / multi-instance scaling)
+  const signedCookie = signOAuthCookiePayload({
+    state: entry.state,
+    nonce: entry.nonce,
+    codeVerifier: entry.codeVerifier,
+    exp,
+  });
+
+  const isProduction = process.env.NODE_ENV === 'production';
+  const cookieHeaders = [
+    `leadsync_oauth_state=${signedCookie}`,
+    'HttpOnly',
+    'Path=/',
+    `Max-Age=600`, // 10 minutes
+    'SameSite=Lax',
+  ];
+  if (isProduction) {
+    cookieHeaders.push('Secure');
+  }
+  res.setHeader('Set-Cookie', cookieHeaders.join('; '));
+
+  // 3. Database persistence (if DB is reachable)
+  try {
+    await prisma.oAuthState.create({
+      data: {
+        state: entry.state,
+        nonce: entry.nonce,
+        codeVerifier: entry.codeVerifier,
+        expiresAt: new Date(exp),
+      },
+    });
+  } catch {
+    // If DB is offline, signed cookie and memory store ensure uninterrupted flow
+  }
+}
+
+/**
+ * Retrieves and atomically consumes the OAuth state, preventing replay attacks.
+ */
+export async function consumeOAuthState(
+  req: Request,
+  res: Response,
+  state: string
+): Promise<{ nonce: string; codeVerifier: string } | 'expired' | null> {
+  // Clear the OAuth state cookie immediately to prevent replay
+  const isProduction = process.env.NODE_ENV === 'production';
+  const clearCookieParts = [
+    'leadsync_oauth_state=',
+    'HttpOnly',
+    'Path=/',
+    'Max-Age=0',
+    'SameSite=Lax',
+  ];
+  if (isProduction) {
+    clearCookieParts.push('Secure');
+  }
+  res.setHeader('Set-Cookie', clearCookieParts.join('; '));
+
+  // 1. Try reading from signed HttpOnly cookie
+  const cookies = parseCookies(req.headers.cookie);
+  const cookieVal = cookies['leadsync_oauth_state'];
+  if (cookieVal) {
+    const verified = verifyOAuthCookiePayload(cookieVal);
+    if (verified && verified.state === state) {
+      // Also delete from DB & memory
+      oauthStateMap.delete(state);
+      try {
+        await prisma.oAuthState.deleteMany({ where: { state } }).catch(() => {});
+      } catch {}
+
+      if (Date.now() > verified.exp) {
+        return 'expired';
+      }
+      return { nonce: verified.nonce, codeVerifier: verified.codeVerifier };
+    }
+  }
+
+  // 2. Try reading from Database
+  try {
+    const dbEntry = await prisma.oAuthState.findUnique({ where: { state } });
+    if (dbEntry) {
+      await prisma.oAuthState.deleteMany({ where: { state } }).catch(() => {});
+      oauthStateMap.delete(state);
+
+      if (Date.now() > dbEntry.expiresAt.getTime()) {
+        return 'expired';
+      }
+      return { nonce: dbEntry.nonce, codeVerifier: dbEntry.codeVerifier };
+    }
+  } catch {}
+
+  // 3. Try reading from memory store
+  const memEntry = oauthStateMap.get(state);
+  if (memEntry) {
+    oauthStateMap.delete(state);
+    if (Date.now() - memEntry.createdAt > STATE_TTL_MS) {
+      return 'expired';
+    }
+    return { nonce: memEntry.nonce, codeVerifier: memEntry.codeVerifier };
+  }
+
+  return null;
+}
+
 // --- Routes ---
 
 /**
  * GET /api/auth/google
- * Initiates Google OAuth2 flow by redirecting to Google's consent / account selection screen.
+ * Initiates Google OAuth2 flow with PKCE, nonce, and durable state.
  */
-router.get('/google', (_req: Request, res: Response): void => {
+router.get('/google', async (_req: Request, res: Response): Promise<void> => {
   try {
     const clientId = getGoogleClientId();
     const redirectUri = getGoogleRedirectUri();
 
+    // Generate random state, nonce, and PKCE code_verifier
     const state = crypto.randomBytes(32).toString('hex');
     const nonce = crypto.randomBytes(32).toString('hex');
+    const codeVerifier = crypto.randomBytes(32).toString('base64url'); // 43 chars RFC 7636
+    const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
 
-    oauthStateMap.set(state, { nonce, createdAt: Date.now() });
+    // Persist state durably (signed cookie + database + memory)
+    await persistOAuthState(res, { state, nonce, codeVerifier });
 
     const params = new URLSearchParams({
       client_id: clientId,
@@ -89,6 +264,8 @@ router.get('/google', (_req: Request, res: Response): void => {
       scope: 'openid email profile',
       state,
       nonce,
+      code_challenge: codeChallenge,
+      code_challenge_method: 'S256',
       access_type: 'offline',
       prompt: 'select_account',
     });
@@ -103,8 +280,8 @@ router.get('/google', (_req: Request, res: Response): void => {
 /**
  * GET /api/auth/google/callback
  * Handles the OAuth2 callback from Google.
- * Validates state, exchanges authorization code for tokens, verifies ID token,
- * verifies owner identity, and creates an application session.
+ * Validates state, exchanges code with PKCE code_verifier, strictly verifies nonce,
+ * checks owner identity, and establishes an HttpOnly session.
  */
 router.get('/google/callback', async (req: Request, res: Response): Promise<void> => {
   const appOrigin = getAppOrigin();
@@ -118,23 +295,20 @@ router.get('/google/callback', async (req: Request, res: Response): Promise<void
       return;
     }
 
-    // Validate state parameter (CSRF protection)
+    // Validate state parameter
     if (!state || typeof state !== 'string') {
       res.redirect(`${appOrigin}/?auth_error=invalid_state`);
       return;
     }
 
-    const storedEntry = oauthStateMap.get(state);
-    if (!storedEntry) {
+    // Retrieve and consume durable state
+    const stateResult = await consumeOAuthState(req, res, state);
+    if (!stateResult || stateResult === null) {
       res.redirect(`${appOrigin}/?auth_error=invalid_state`);
       return;
     }
 
-    // Remove state immediately to prevent replay attacks
-    oauthStateMap.delete(state);
-
-    // Check if state has expired
-    if (Date.now() - storedEntry.createdAt > STATE_TTL_MS) {
+    if (stateResult === 'expired') {
       res.redirect(`${appOrigin}/?auth_error=expired_state`);
       return;
     }
@@ -144,11 +318,14 @@ router.get('/google/callback', async (req: Request, res: Response): Promise<void
       return;
     }
 
-    // Exchange code for tokens
+    // Exchange code for tokens using PKCE code_verifier
     const clientId = getGoogleClientId();
     const client = createOAuth2Client();
 
-    const { tokens } = await client.getToken(code);
+    const { tokens } = await client.getToken({
+      code,
+      codeVerifier: stateResult.codeVerifier,
+    });
 
     if (!tokens.id_token) {
       res.redirect(`${appOrigin}/?auth_error=no_id_token`);
@@ -180,8 +357,8 @@ router.get('/google/callback', async (req: Request, res: Response): Promise<void
       return;
     }
 
-    // Validate nonce
-    if (payload.nonce && payload.nonce !== storedEntry.nonce) {
+    // MANDATORY EXACT NONCE MATCH (Non-conditional)
+    if (!payload.nonce || payload.nonce !== stateResult.nonce) {
       res.redirect(`${appOrigin}/?auth_error=invalid_nonce`);
       return;
     }

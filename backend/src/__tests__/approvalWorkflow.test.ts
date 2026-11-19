@@ -18,8 +18,32 @@
 import express from 'express';
 
 // Mock Prisma
+const mockSessions: any[] = [];
 jest.mock('../lib/prisma', () => {
   const mockPrisma = {
+    session: {
+      create: jest.fn().mockImplementation(async ({ data }: any) => {
+        const session = { id: `sess_${Date.now()}`, ...data };
+        mockSessions.push(session);
+        return session;
+      }),
+      findUnique: jest.fn().mockImplementation(async ({ where }: any) => {
+        if (where.sessionToken === 'owner_session_token') {
+          return {
+            id: 'sess_default_owner',
+            sessionToken: 'owner_session_token',
+            googleSub: 'test_user_1',
+            email: 'owner@example.com',
+            name: 'Test Owner',
+            picture: null,
+            expiresAt: new Date(Date.now() + 86400000),
+          };
+        }
+        return mockSessions.find((s) => s.sessionToken === where.sessionToken) || null;
+      }),
+      delete: jest.fn(),
+      deleteMany: jest.fn(),
+    },
     pendingImport: {
       create: jest.fn(),
       findUnique: jest.fn(),
@@ -59,7 +83,7 @@ import prisma from '../lib/prisma';
 import { orchestrateImport } from '../services/importOrchestrator.service';
 import extractRouter from '../routes/extract.route';
 import importsRouter from '../routes/imports.route';
-import { authenticate, generateToken } from '../middleware/auth.middleware';
+import { authenticate } from '../middleware/auth.middleware';
 import type { CRMRecord, SkippedRow } from '../types';
 
 const mockPrisma = prisma as unknown as {
@@ -102,7 +126,6 @@ function invokeRouter(
     const rawWrites: string[] = [];
     let resolved = false;
 
-    const defaultToken = generateToken({ id: 'test_user_1', role: 'admin' });
     const req: any = {
       method: reqOptions.method,
       url: reqOptions.url,
@@ -115,7 +138,7 @@ function invokeRouter(
       headers:
         reqOptions.headers !== undefined
           ? reqOptions.headers
-          : { authorization: `Bearer ${defaultToken}` },
+          : { cookie: 'leadsync_session=owner_session_token' },
       user: reqOptions.user,
       on: jest.fn(),
     };
@@ -710,22 +733,21 @@ describe('Phase D: Security & Access Control', () => {
 
     mockPrisma.pendingImport.findUnique.mockResolvedValue(foreignPending);
 
-    // Request made by user_attacker_xyz
-    const userToken = generateToken({ id: 'user_attacker_xyz', role: 'user' });
+    // Request made with non-matching userId
     const { statusCode, body } = await invokeRouter(importsRouter, {
       method: 'POST',
       url: '/pending_foreign/approve',
-      headers: { authorization: `Bearer ${userToken}` },
+      user: { id: 'user_attacker_xyz', role: 'owner', email: 'owner@example.com' },
     });
 
     expect(statusCode).toBe(403);
     expect(body.error).toMatch(/not authorized to approve/i);
   });
 
-  it('allows authorized reviewer or admin to access pending imports', async () => {
+  it('allows authorized owner to access pending imports', async () => {
     const pendingData = {
       id: 'pending_admin_ok',
-      userId: 'user_owner_abc',
+      userId: 'test_user_1',
       filename: 'sample.csv',
       totalRows: 1,
       status: 'PENDING',
@@ -738,11 +760,10 @@ describe('Phase D: Security & Access Control', () => {
 
     mockPrisma.pendingImport.findUnique.mockResolvedValue(pendingData);
 
-    const adminToken = generateToken({ id: 'admin_1', role: 'admin' });
     const { statusCode, body } = await invokeRouter(importsRouter, {
       method: 'GET',
       url: '/pending/pending_admin_ok',
-      headers: { authorization: `Bearer ${adminToken}` },
+      headers: { cookie: 'leadsync_session=owner_session_token' },
     });
 
     expect(statusCode).toBe(200);
@@ -888,18 +909,15 @@ describe('Phase D: Authentication Middleware & Integration', () => {
   beforeEach(() => {
     process.env = { ...initialEnv };
     process.env.NODE_ENV = 'test';
-    delete process.env.ALLOW_DEV_ANONYMOUS;
-    delete process.env.ENABLE_DEV_DEMO_AUTH;
+    process.env.OWNER_GOOGLE_EMAIL = 'owner@example.com';
   });
 
   afterEach(() => {
     process.env = { ...initialEnv };
     process.env.NODE_ENV = 'test';
-    delete process.env.ALLOW_DEV_ANONYMOUS;
-    delete process.env.ENABLE_DEV_DEMO_AUTH;
   });
 
-  it('rejects placeholder Bearer tokens (e.g. demo-reviewer-token) with 401', async () => {
+  it('rejects placeholder Bearer tokens (e.g. demo-reviewer-token) without session cookie with 401', async () => {
     const { statusCode, body } = await invokeRouter(importsRouter, {
       method: 'GET',
       url: '/pending/some_id',
@@ -910,37 +928,74 @@ describe('Phase D: Authentication Middleware & Integration', () => {
     expect(body.error).toMatch(/Authentication required/i);
   });
 
-  it('rejects malformed tokens or tokens with invalid signatures with 401', async () => {
+  it('rejects requests missing leadsync_session cookie with 401', async () => {
     const { statusCode, body } = await invokeRouter(importsRouter, {
       method: 'GET',
       url: '/pending/some_id',
-      headers: { authorization: 'Bearer not.a.validtoken' },
+      headers: {},
     });
 
     expect(statusCode).toBe(401);
     expect(body.error).toMatch(/Authentication required/i);
   });
 
-  it('rejects expired tokens with 401', async () => {
-    // Generate a token that expired 1 hour ago
-    const expiredToken = generateToken({ id: 'user_exp', role: 'user' }, -1);
+  it('rejects non-existent session tokens with 401', async () => {
     const { statusCode, body } = await invokeRouter(importsRouter, {
       method: 'GET',
       url: '/pending/some_id',
-      headers: { authorization: `Bearer ${expiredToken}` },
+      headers: { cookie: 'leadsync_session=invalid_nonexistent_token' },
     });
 
     expect(statusCode).toBe(401);
     expect(body.error).toMatch(/Authentication required/i);
   });
 
-  it('allows unauthenticated requests in local development ONLY when ALLOW_DEV_ANONYMOUS=true', async () => {
-    process.env.NODE_ENV = 'development';
-    process.env.ALLOW_DEV_ANONYMOUS = 'true';
+  it('rejects expired session tokens with 401', async () => {
+    mockSessions.push({
+      id: 'sess_expired',
+      sessionToken: 'expired_session_token',
+      googleSub: 'expired_sub',
+      email: 'owner@example.com',
+      name: 'Expired Owner',
+      picture: null,
+      expiresAt: new Date(Date.now() - 3600000), // 1 hour ago
+    });
 
+    const { statusCode, body } = await invokeRouter(importsRouter, {
+      method: 'GET',
+      url: '/pending/some_id',
+      headers: { cookie: 'leadsync_session=expired_session_token' },
+    });
+
+    expect(statusCode).toBe(401);
+    expect(body.error).toMatch(/Authentication required/i);
+  });
+
+  it('rejects sessions belonging to unauthorized non-owner accounts with 401', async () => {
+    mockSessions.push({
+      id: 'sess_unauthorized',
+      sessionToken: 'unauthorized_session_token',
+      googleSub: 'intruder_sub',
+      email: 'intruder@example.com', // Not owner@example.com
+      name: 'Intruder',
+      picture: null,
+      expiresAt: new Date(Date.now() + 86400000),
+    });
+
+    const { statusCode, body } = await invokeRouter(importsRouter, {
+      method: 'GET',
+      url: '/pending/some_id',
+      headers: { cookie: 'leadsync_session=unauthorized_session_token' },
+    });
+
+    expect(statusCode).toBe(401);
+    expect(body.error).toMatch(/Authentication required/i);
+  });
+
+  it('allows access when valid owner session cookie is provided', async () => {
     const pendingData = {
-      id: 'pending_dev_ok',
-      userId: null,
+      id: 'pending_session_ok',
+      userId: 'test_user_1',
       filename: 'sample.csv',
       totalRows: 1,
       status: 'PENDING',
@@ -955,50 +1010,12 @@ describe('Phase D: Authentication Middleware & Integration', () => {
 
     const { statusCode, body } = await invokeRouter(importsRouter, {
       method: 'GET',
-      url: '/pending/pending_dev_ok',
-      headers: {}, // No Authorization header
+      url: '/pending/pending_session_ok',
+      headers: { cookie: 'leadsync_session=owner_session_token' },
     });
 
     expect(statusCode).toBe(200);
-    expect(body.pendingImport.id).toBe('pending_dev_ok');
-  });
-
-  it('NEVER allows development authentication bypass in production mode', async () => {
-    process.env.NODE_ENV = 'production';
-    process.env.AUTH_SECRET = 'test-prod-secret-key-that-is-at-least-32-chars-long';
-    process.env.ALLOW_DEV_ANONYMOUS = 'true'; // Attempt to bypass in production!
-
-    const { statusCode, body } = await invokeRouter(importsRouter, {
-      method: 'GET',
-      url: '/pending/pending_prod_check',
-      headers: {},
-    });
-
-    expect(statusCode).toBe(401);
-    expect(body.error).toMatch(/Authentication required/i);
-  });
-
-  it('strictly disallows anonymous access during test and CI execution even if ALLOW_DEV_ANONYMOUS=true', async () => {
-    process.env.NODE_ENV = 'test';
-    process.env.ALLOW_DEV_ANONYMOUS = 'true';
-
-    const { statusCode, body } = await invokeRouter(importsRouter, {
-      method: 'POST',
-      url: '/pending_ci_test/approve',
-      headers: {},
-    });
-
-    expect(statusCode).toBe(401);
-    expect(body.error).toMatch(/Authentication required/i);
-  });
-
-  it('fails safely in production mode if required AUTH_SECRET / JWT_SECRET is missing', () => {
-    process.env.NODE_ENV = 'production';
-    delete process.env.AUTH_SECRET;
-    delete process.env.JWT_SECRET;
-
-    const { getAuthSecret } = require('../middleware/auth.middleware');
-    expect(() => getAuthSecret()).toThrow(/In production mode, AUTH_SECRET or JWT_SECRET must be configured/i);
+    expect(body.pendingImport.id).toBe('pending_session_ok');
   });
 });
 

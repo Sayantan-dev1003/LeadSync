@@ -1,13 +1,12 @@
 import { Request, Response, NextFunction } from 'express';
-import crypto from 'crypto';
 import prisma from '../lib/prisma';
 
-export type UserRole = 'admin' | 'reviewer' | 'user' | 'owner';
+export type UserRole = 'owner';
 
 export interface AuthUser {
   id: string;
   role: UserRole;
-  email?: string;
+  email: string;
   name?: string | null;
   picture?: string | null;
 }
@@ -19,8 +18,6 @@ declare global {
     }
   }
 }
-
-const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 
 /**
  * Helper to parse cookies from the Cookie header.
@@ -42,110 +39,6 @@ export function parseCookies(cookieHeader: string | undefined): Record<string, s
     }
   });
   return cookies;
-}
-
-/**
- * Returns the authentication secret for token signing and verification.
- * Fails safely in production if neither AUTH_SECRET nor JWT_SECRET is configured.
- */
-export function getAuthSecret(): string {
-  const secret = process.env.SESSION_SECRET || process.env.AUTH_SECRET || process.env.JWT_SECRET;
-  if (!secret) {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('FATAL: In production mode, AUTH_SECRET or JWT_SECRET must be configured.');
-    }
-    return 'leadsync-default-hmac-sha256-secret-key-32chars';
-  }
-  return secret;
-}
-
-/**
- * Checks whether local development demo mode is explicitly enabled.
- * Strictly restricted to NODE_ENV === 'development' with explicit opt-in.
- * Never allowed in test or production environments.
- */
-export function isDevDemoAuthEnabled(): boolean {
-  return (
-    process.env.NODE_ENV === 'development' &&
-    (process.env.ALLOW_DEV_ANONYMOUS === 'true' || process.env.ENABLE_DEV_DEMO_AUTH === 'true')
-  );
-}
-
-// Deterministic fallback dev user for explicitly enabled local DX demo mode
-export const DEFAULT_DEV_USER: AuthUser = {
-  id: 'usr_dev_reviewer_01',
-  role: 'owner',
-  email: 'owner@leadsync.internal',
-};
-
-/**
- * Creates a signed JWT-style token (header.payload.signature) using native crypto.
- */
-export function generateToken(
-  user: { id: string; role?: UserRole; email?: string },
-  expiresInHours: number = 24
-): string {
-  const secret = getAuthSecret();
-  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
-  const payload = Buffer.from(
-    JSON.stringify({
-      id: user.id,
-      role: user.role || 'user',
-      email: user.email,
-      exp: Math.floor(Date.now() / 1000) + expiresInHours * 3600,
-    })
-  ).toString('base64url');
-
-  const signature = crypto
-    .createHmac('sha256', secret)
-    .update(`${header}.${payload}`)
-    .digest('base64url');
-
-  return `${header}.${payload}.${signature}`;
-}
-
-/**
- * Verifies and decodes a token. Returns null if invalid, expired, or signature mismatch.
- */
-export function verifyToken(token: string): AuthUser | null {
-  if (!token || typeof token !== 'string') return null;
-
-  const parts = token.split('.');
-  if (parts.length !== 3) return null;
-
-  let secret: string;
-  try {
-    secret = getAuthSecret();
-  } catch {
-    return null;
-  }
-
-  const [header, payload, signature] = parts;
-  const expectedSignature = crypto
-    .createHmac('sha256', secret)
-    .update(`${header}.${payload}`)
-    .digest('base64url');
-
-  // Constant-time comparison to prevent timing attacks
-  if (signature.length !== expectedSignature.length) return null;
-  const sigBuf = Buffer.from(signature);
-  const expBuf = Buffer.from(expectedSignature);
-  if (!crypto.timingSafeEqual(sigBuf, expBuf)) return null;
-
-  try {
-    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    if (decoded.exp && Date.now() / 1000 > decoded.exp) {
-      return null; // Expired
-    }
-    if (!decoded.id || !decoded.role) return null;
-    return {
-      id: decoded.id,
-      role: decoded.role as UserRole,
-      email: decoded.email,
-    };
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -200,15 +93,11 @@ export function verifyCsrf(req: Request, res: Response, next: NextFunction): voi
 }
 
 /**
- * Middleware that extracts credentials from:
- * 1. Session cookie (leadsync_session) -> resolves owner from database
- * 2. API Key header (x-api-key)
- * 3. Authorization Bearer token header
- * 4. Development demo fallback if explicitly enabled
+ * Session verification middleware.
+ * Verifies session strictly via the leadsync_session HttpOnly cookie against the database.
  */
 export async function authenticate(req: Request, _res: Response, next: NextFunction): Promise<void> {
   try {
-    // 1. Session Cookie lookup
     const cookies = parseCookies(req.headers.cookie);
     const sessionToken = cookies['leadsync_session'];
 
@@ -232,57 +121,17 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
               name: session.name,
               picture: session.picture,
             };
-            next();
-            return;
+            return next();
           }
         }
       } catch {
-        // If DB query fails, continue to check headers
+        // If DB query fails, continue unauthenticated
       }
-    }
-
-    const authHeader = req.headers.authorization;
-    const apiKey = req.headers['x-api-key'] as string | undefined;
-
-    // 2. Check API Key
-    if (apiKey && ADMIN_API_KEY && apiKey === ADMIN_API_KEY) {
-      req.user = { id: 'admin_apikey_user', role: 'admin' };
-      next();
-      return;
-    }
-
-    // 3. Check Bearer token
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.slice(7).trim();
-      if (token) {
-        const verified = verifyToken(token);
-        if (verified) {
-          req.user = verified;
-        }
-        next();
-        return;
-      }
-    }
-
-    // 4. Dev demo fallback ONLY if explicitly enabled
-    if (isDevDemoAuthEnabled() && !authHeader && !apiKey && !sessionToken) {
-      req.user = DEFAULT_DEV_USER;
     }
   } catch {
     // Continue unauthenticated on unexpected error
   }
 
-  next();
-}
-
-/**
- * Middleware enforcing authentication. Rejects with 401 if unauthenticated.
- */
-export function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  if (!req.user) {
-    res.status(401).json({ error: 'Authentication required. Please sign in with Google.' });
-    return;
-  }
   next();
 }
 
@@ -296,8 +145,7 @@ export function requireOwner(req: Request, res: Response, next: NextFunction): v
     return;
   }
 
-  const isAuthorized = req.user.role === 'owner' || req.user.role === 'admin' || req.user.role === 'reviewer';
-  if (!isAuthorized) {
+  if (req.user.role !== 'owner') {
     res.status(403).json({ error: 'Forbidden: Owner privileges required.' });
     return;
   }
@@ -306,33 +154,19 @@ export function requireOwner(req: Request, res: Response, next: NextFunction): v
 }
 
 /**
- * Middleware enforcing specific user role(s). Rejects with 403 if unauthorized.
+ * Alias for requireOwner to protect all CRM endpoints with single-owner authorization.
  */
-export function requireRole(...allowedRoles: UserRole[]) {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    if (!req.user) {
-      res.status(401).json({ error: 'Authentication required' });
-      return;
-    }
-    if (!allowedRoles.includes(req.user.role)) {
-      res.status(403).json({ error: `Forbidden: requires one of roles [${allowedRoles.join(', ')}]` });
-      return;
-    }
-    next();
-  };
-}
+export const requireAuth = requireOwner;
 
 /**
  * Authorizes access to a pending import based on ownership.
- * Owner or administrative roles can access all imports.
- * Legacy unassigned imports or imports matching user id are also accessible.
  */
 export function isAuthorizedForPendingImport(
   user: AuthUser,
   pendingImport: { userId?: string | null }
 ): boolean {
-  if (user.role === 'owner' || user.role === 'admin' || user.role === 'reviewer') return true;
-  if (!pendingImport.userId) return true;
-  if (pendingImport.userId === user.id) return true;
-  return false;
+  if (pendingImport.userId && pendingImport.userId !== user.id) {
+    return false;
+  }
+  return true;
 }

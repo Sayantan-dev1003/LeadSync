@@ -3,6 +3,10 @@ const nextConfig = {
   env: {
     NEXT_PUBLIC_BACKEND_URL: process.env.NEXT_PUBLIC_BACKEND_URL || '',
   },
+  experimental: {
+    cpus: 1,
+    workerThreads: false,
+  },
   async rewrites() {
     const backendUrl =
       process.env.BACKEND_PROXY_URL ||

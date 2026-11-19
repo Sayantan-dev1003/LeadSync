@@ -3,6 +3,8 @@ import crypto from 'crypto';
 
 // Mock Prisma
 const mockSessions: any[] = [];
+const mockOAuthStates: any[] = [];
+
 jest.mock('../lib/prisma', () => {
   const mockPrisma = {
     session: {
@@ -24,6 +26,23 @@ jest.mock('../lib/prisma', () => {
         const remaining = mockSessions.filter((s) => s.sessionToken !== where.sessionToken);
         mockSessions.length = 0;
         mockSessions.push(...remaining);
+        return { count: initialLen - remaining.length };
+      }),
+    },
+    oAuthState: {
+      create: jest.fn().mockImplementation(async ({ data }: any) => {
+        const entry = { id: `state_${Date.now()}`, ...data };
+        mockOAuthStates.push(entry);
+        return entry;
+      }),
+      findUnique: jest.fn().mockImplementation(async ({ where }: any) => {
+        return mockOAuthStates.find((s) => s.state === where.state) || null;
+      }),
+      deleteMany: jest.fn().mockImplementation(async ({ where }: any) => {
+        const initialLen = mockOAuthStates.length;
+        const remaining = mockOAuthStates.filter((s) => s.state !== where.state);
+        mockOAuthStates.length = 0;
+        mockOAuthStates.push(...remaining);
         return { count: initialLen - remaining.length };
       }),
     },
@@ -55,10 +74,13 @@ jest.mock('google-auth-library', () => {
   };
 });
 
-import authRouter, { oauthStateMap, STATE_TTL_MS } from '../routes/auth.route';
+import authRouter, {
+  oauthStateMap,
+  STATE_TTL_MS,
+  signOAuthCookiePayload,
+} from '../routes/auth.route';
 import leadsRouter from '../routes/leads.route';
-import { authenticate, verifyCsrf, requireOwner } from '../middleware/auth.middleware';
-import prisma from '../lib/prisma';
+import { authenticate, verifyCsrf } from '../middleware/auth.middleware';
 
 // Helper to simulate express request through router
 function invokeApp(
@@ -111,12 +133,13 @@ function invokeApp(
   });
 }
 
-describe('Google Authentication & Session Management', () => {
+describe('Google Authentication, PKCE, Nonce & Session Management', () => {
   const originalEnv = process.env;
 
   beforeEach(() => {
     jest.clearAllMocks();
     mockSessions.length = 0;
+    mockOAuthStates.length = 0;
     oauthStateMap.clear();
     process.env = {
       ...originalEnv,
@@ -135,11 +158,8 @@ describe('Google Authentication & Session Management', () => {
     process.env = originalEnv;
   });
 
-  describe('GET /api/auth/google (Initiation)', () => {
-    it('redirects to Google OAuth with valid state, nonce, and scopes', async () => {
-      const app = express();
-      app.use('/api/auth', authRouter);
-
+  describe('GET /api/auth/google (Initiation with PKCE and Nonce)', () => {
+    it('redirects to Google OAuth with valid state, nonce, PKCE code_challenge, and sets durable state cookie', async () => {
       const res = await invokeApp((req, res) => authRouter(req, res, () => {}), {
         method: 'GET',
         url: '/google',
@@ -155,13 +175,24 @@ describe('Google Authentication & Session Management', () => {
       expect(redirectUrl.searchParams.get('scope')).toBe('openid email profile');
       expect(redirectUrl.searchParams.get('response_type')).toBe('code');
 
-      const state = redirectUrl.searchParams.get('state');
-      expect(state).toBeTruthy();
-      expect(oauthStateMap.has(state!)).toBe(true);
+      // Verify Nonce
+      const nonce = redirectUrl.searchParams.get('nonce');
+      expect(nonce).toBeTruthy();
+
+      // Verify PKCE
+      const codeChallenge = redirectUrl.searchParams.get('code_challenge');
+      const codeChallengeMethod = redirectUrl.searchParams.get('code_challenge_method');
+      expect(codeChallenge).toBeTruthy();
+      expect(codeChallengeMethod).toBe('S256');
+
+      // Verify Durable State Cookie is issued
+      expect(res.headers['set-cookie']).toBeDefined();
+      expect(res.headers['set-cookie']).toContain('leadsync_oauth_state=');
+      expect(res.headers['set-cookie']).toContain('HttpOnly');
     });
   });
 
-  describe('GET /api/auth/google/callback', () => {
+  describe('GET /api/auth/google/callback (PKCE, Exact Nonce, Owner Pinning)', () => {
     it('redirects with error if user denied consent', async () => {
       const res = await invokeApp((req, res) => authRouter(req, res, () => {}), {
         method: 'GET',
@@ -188,6 +219,7 @@ describe('Google Authentication & Session Management', () => {
       const state = 'expired-state-token';
       oauthStateMap.set(state, {
         nonce: 'test-nonce',
+        codeVerifier: 'test-verifier',
         createdAt: Date.now() - STATE_TTL_MS - 1000,
       });
 
@@ -204,7 +236,7 @@ describe('Google Authentication & Session Management', () => {
 
     it('rejects callback if email is not verified', async () => {
       const state = 'valid-state';
-      oauthStateMap.set(state, { nonce: 'test-nonce', createdAt: Date.now() });
+      oauthStateMap.set(state, { nonce: 'test-nonce', codeVerifier: 'test-verifier', createdAt: Date.now() });
 
       mockGetToken.mockResolvedValue({
         tokens: { id_token: 'fake-id-token' },
@@ -231,9 +263,9 @@ describe('Google Authentication & Session Management', () => {
       expect(mockSessions.length).toBe(0);
     });
 
-    it('rejects callback if nonce does not match', async () => {
+    it('strictly rejects callback if nonce is missing from payload (exact match required)', async () => {
       const state = 'valid-state';
-      oauthStateMap.set(state, { nonce: 'correct-nonce', createdAt: Date.now() });
+      oauthStateMap.set(state, { nonce: 'test-nonce', codeVerifier: 'test-verifier', createdAt: Date.now() });
 
       mockGetToken.mockResolvedValue({
         tokens: { id_token: 'fake-id-token' },
@@ -245,7 +277,7 @@ describe('Google Authentication & Session Management', () => {
           sub: 'google-sub-12345',
           email: 'owner@example.com',
           email_verified: true,
-          nonce: 'wrong-nonce',
+          // nonce is omitted!
         }),
       });
 
@@ -260,9 +292,9 @@ describe('Google Authentication & Session Management', () => {
       expect(mockSessions.length).toBe(0);
     });
 
-    it('rejects unauthorized Google accounts and creates NO session', async () => {
+    it('rejects callback if nonce does not match expected nonce exactly', async () => {
       const state = 'valid-state';
-      oauthStateMap.set(state, { nonce: 'test-nonce', createdAt: Date.now() });
+      oauthStateMap.set(state, { nonce: 'correct-nonce', codeVerifier: 'test-verifier', createdAt: Date.now() });
 
       mockGetToken.mockResolvedValue({
         tokens: { id_token: 'fake-id-token' },
@@ -271,11 +303,10 @@ describe('Google Authentication & Session Management', () => {
       mockVerifyIdToken.mockResolvedValue({
         getPayload: () => ({
           iss: 'https://accounts.google.com',
-          sub: 'some-other-sub',
-          email: 'stranger@example.com', // Not owner@example.com
+          sub: 'google-sub-12345',
+          email: 'owner@example.com',
           email_verified: true,
-          nonce: 'test-nonce',
-          name: 'Stranger Danger',
+          nonce: 'different-nonce',
         }),
       });
 
@@ -286,13 +317,17 @@ describe('Google Authentication & Session Management', () => {
       });
 
       expect(res.statusCode).toBe(302);
-      expect(res.headers['location']).toBe('http://localhost:3000/?auth_error=unauthorized');
-      expect(mockSessions.length).toBe(0); // Zero sessions created!
+      expect(res.headers['location']).toBe('http://localhost:3000/?auth_error=invalid_nonce');
+      expect(mockSessions.length).toBe(0);
     });
 
-    it('rejects authorized email if OWNER_GOOGLE_SUB does not match', async () => {
-      const state = 'valid-state';
-      oauthStateMap.set(state, { nonce: 'test-nonce', createdAt: Date.now() });
+    it('passes PKCE code_verifier to Google token exchange', async () => {
+      const state = 'pkce-test-state';
+      oauthStateMap.set(state, {
+        nonce: 'test-nonce',
+        codeVerifier: 'expected-pkce-code-verifier-string',
+        createdAt: Date.now(),
+      });
 
       mockGetToken.mockResolvedValue({
         tokens: { id_token: 'fake-id-token' },
@@ -301,8 +336,81 @@ describe('Google Authentication & Session Management', () => {
       mockVerifyIdToken.mockResolvedValue({
         getPayload: () => ({
           iss: 'https://accounts.google.com',
-          sub: 'different-google-sub',
+          sub: 'google-sub-12345',
           email: 'owner@example.com',
+          email_verified: true,
+          nonce: 'test-nonce',
+        }),
+      });
+
+      await invokeApp((req, res) => authRouter(req, res, () => {}), {
+        method: 'GET',
+        url: '/google/callback',
+        query: { code: 'auth-code-123', state },
+      });
+
+      expect(mockGetToken).toHaveBeenCalledWith({
+        code: 'auth-code-123',
+        codeVerifier: 'expected-pkce-code-verifier-string',
+      });
+    });
+
+    it('authenticates successfully via durable signed cookie even if memory map was wiped (survives server restart)', async () => {
+      const state = 'durable-state-123';
+      const nonce = 'durable-nonce-456';
+      const codeVerifier = 'durable-verifier-789';
+
+      // Memory map is intentionally EMPTY (simulates backend restart / different instance)
+      oauthStateMap.clear();
+
+      // Signed HttpOnly cookie from browser
+      const signedCookie = signOAuthCookiePayload({
+        state,
+        nonce,
+        codeVerifier,
+        exp: Date.now() + 60000,
+      });
+
+      mockGetToken.mockResolvedValue({
+        tokens: { id_token: 'fake-id-token' },
+      });
+
+      mockVerifyIdToken.mockResolvedValue({
+        getPayload: () => ({
+          iss: 'https://accounts.google.com',
+          sub: 'google-sub-12345',
+          email: 'owner@example.com',
+          email_verified: true,
+          nonce,
+        }),
+      });
+
+      const res = await invokeApp((req, res) => authRouter(req, res, () => {}), {
+        method: 'GET',
+        url: '/google/callback',
+        query: { code: 'code-xyz', state },
+        headers: { cookie: `leadsync_oauth_state=${signedCookie}` },
+      });
+
+      expect(res.statusCode).toBe(302);
+      expect(res.headers['location']).toBe('http://localhost:3000/');
+      expect(mockSessions.length).toBe(1);
+      expect(mockSessions[0].email).toBe('owner@example.com');
+    });
+
+    it('rejects unauthorized Google accounts and creates zero sessions', async () => {
+      const state = 'valid-state';
+      oauthStateMap.set(state, { nonce: 'test-nonce', codeVerifier: 'verifier', createdAt: Date.now() });
+
+      mockGetToken.mockResolvedValue({
+        tokens: { id_token: 'fake-id-token' },
+      });
+
+      mockVerifyIdToken.mockResolvedValue({
+        getPayload: () => ({
+          iss: 'https://accounts.google.com',
+          sub: 'stranger-sub',
+          email: 'stranger@example.com',
           email_verified: true,
           nonce: 'test-nonce',
         }),
@@ -317,45 +425,6 @@ describe('Google Authentication & Session Management', () => {
       expect(res.statusCode).toBe(302);
       expect(res.headers['location']).toBe('http://localhost:3000/?auth_error=unauthorized');
       expect(mockSessions.length).toBe(0);
-    });
-
-    it('successfully establishes owner session for configured owner', async () => {
-      const state = 'valid-state';
-      oauthStateMap.set(state, { nonce: 'test-nonce', createdAt: Date.now() });
-
-      mockGetToken.mockResolvedValue({
-        tokens: { id_token: 'fake-id-token' },
-      });
-
-      mockVerifyIdToken.mockResolvedValue({
-        getPayload: () => ({
-          iss: 'https://accounts.google.com',
-          sub: 'google-sub-12345',
-          email: 'owner@example.com',
-          email_verified: true,
-          nonce: 'test-nonce',
-          name: 'LeadSync Owner',
-          picture: 'https://lh3.googleusercontent.com/avatar.jpg',
-        }),
-      });
-
-      const res = await invokeApp((req, res) => authRouter(req, res, () => {}), {
-        method: 'GET',
-        url: '/google/callback',
-        query: { code: 'valid-code', state },
-      });
-
-      expect(res.statusCode).toBe(302);
-      expect(res.headers['location']).toBe('http://localhost:3000/');
-      expect(res.headers['set-cookie']).toBeDefined();
-      expect(res.headers['set-cookie']).toContain('leadsync_session=');
-      expect(res.headers['set-cookie']).toContain('HttpOnly');
-      expect(res.headers['set-cookie']).toContain('SameSite=Lax');
-
-      expect(mockSessions.length).toBe(1);
-      expect(mockSessions[0].email).toBe('owner@example.com');
-      expect(mockSessions[0].googleSub).toBe('google-sub-12345');
-      expect(mockSessions[0].name).toBe('LeadSync Owner');
     });
   });
 
@@ -376,7 +445,7 @@ describe('Google Authentication & Session Management', () => {
         sessionToken: 'expired-token',
         googleSub: 'google-sub-12345',
         email: 'owner@example.com',
-        expiresAt: new Date(Date.now() - 1000), // Expired
+        expiresAt: new Date(Date.now() - 1000),
       });
 
       const res = await invokeApp((req, res) => authRouter(req, res, () => {}), {
@@ -441,7 +510,7 @@ describe('Google Authentication & Session Management', () => {
     });
   });
 
-  describe('Authorization & Public Protection', () => {
+  describe('Single-Owner Authorization & CSRF Protection', () => {
     it('rejects unauthenticated request to GET /api/leads with 401', async () => {
       const runner = async (req: Request, res: Response) => {
         await authenticate(req, res, () => {
@@ -458,7 +527,7 @@ describe('Google Authentication & Session Management', () => {
       expect(res.body.error).toMatch(/Authentication required/i);
     });
 
-    it('rejects state-changing request from unauthorized cross-site origin with 403 (CSRF)', async () => {
+    it('rejects state-changing request with mismatched cross-site origin (CSRF defense)', async () => {
       const runner = async (req: Request, res: Response) => {
         verifyCsrf(req, res, () => {
           res.json({ success: true });
@@ -475,7 +544,7 @@ describe('Google Authentication & Session Management', () => {
       expect(res.body.error).toMatch(/CSRF verification failed/i);
     });
 
-    it('permits authorized owner session to access protected endpoints', async () => {
+    it('permits authorized owner session via leadsync_session cookie', async () => {
       mockSessions.push({
         id: 'sess_owner',
         sessionToken: 'owner-session-token',

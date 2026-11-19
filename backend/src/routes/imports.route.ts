@@ -4,7 +4,7 @@ import { validateCRMRecord } from '../services/zodSchemas.service';
 import { shouldSkipRow } from '../services/validators.service';
 import {
   requireAuth,
-  requireRole,
+  requireOwner,
   isAuthorizedForPendingImport,
 } from '../middleware/auth.middleware';
 import { sanitizeLogMessage } from '../lib/sanitizer';
@@ -441,7 +441,7 @@ router.post('/:pendingImportId/reject', requireAuth, async (req: Request, res: R
  * POST /api/imports/cleanup
  * Admin maintenance endpoint to trigger expired staged-import cleanup.
  */
-router.post('/cleanup', requireAuth, requireRole('admin'), async (_req: Request, res: Response): Promise<void> => {
+router.post('/cleanup', requireOwner, async (_req: Request, res: Response): Promise<void> => {
   try {
     const result = await cleanupExpiredPendingImports();
     res.json({ success: true, result });

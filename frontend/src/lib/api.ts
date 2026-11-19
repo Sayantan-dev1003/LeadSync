@@ -5,28 +5,6 @@ const BACKEND_URL =
     ? (process.env.NEXT_PUBLIC_BACKEND_URL || '')
     : (process.env.BACKEND_PROXY_URL || process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:4000');
 
-export function getAuthToken(): string | null {
-  if (typeof window !== 'undefined') {
-    const stored = localStorage.getItem('leadsync_auth_token');
-    if (stored && stored.trim() && stored !== 'demo-reviewer-token') {
-      return stored.trim();
-    }
-  }
-  const envToken = process.env.NEXT_PUBLIC_API_TOKEN;
-  if (envToken && envToken.trim() && envToken !== 'demo-reviewer-token') {
-    return envToken.trim();
-  }
-  return null;
-}
-
-export function getAuthHeaders(): Record<string, string> {
-  const token = getAuthToken();
-  if (!token) return {};
-  return {
-    Authorization: `Bearer ${token}`,
-  };
-}
-
 export interface ExtractProgressEvent {
   type: 'progress';
   batchIndex: number;
@@ -62,7 +40,7 @@ export type ExtractEvent = ExtractProgressEvent | ExtractCompleteEvent | Extract
  * Strict validation:
  * - Rejects if complete event lacks a valid pendingImportId.
  * - Rejects if stream ends without complete event.
- * - Attaches authorization headers and credentials.
+ * - Automatically passes HttpOnly session cookies via credentials: 'include'.
  */
 export async function extractLeads(
   file: File,
@@ -75,9 +53,6 @@ export async function extractLeads(
   const response = await fetch(`${BACKEND_URL}/api/extract`, {
     method: 'POST',
     credentials: 'include',
-    headers: {
-      ...getAuthHeaders(),
-    },
     body: formData,
     signal,
   });
@@ -212,7 +187,6 @@ export async function approvePendingImport(pendingImportId: string): Promise<App
     credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
-      ...getAuthHeaders(),
     },
   });
 
@@ -241,7 +215,6 @@ export async function rejectPendingImport(pendingImportId: string): Promise<Reje
     credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
-      ...getAuthHeaders(),
     },
   });
 
@@ -267,9 +240,6 @@ export async function getPendingImport(pendingImportId: string): Promise<Pending
 
   const response = await fetch(`${BACKEND_URL}/api/imports/pending/${pendingImportId}`, {
     credentials: 'include',
-    headers: {
-      ...getAuthHeaders(),
-    },
   });
 
   if (!response.ok) {
