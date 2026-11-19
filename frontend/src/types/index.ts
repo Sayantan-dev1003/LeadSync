@@ -49,6 +49,50 @@ export interface FailedRow {
   reason: string;
 }
 
+export interface EstimatedCostSummary {
+  totalCostUsd: number | null;
+  currency: 'USD';
+  isEstimated: true;
+  pricingConfigured: boolean;
+  inputCostUsd?: number | null;
+  outputCostUsd?: number | null;
+  cachedCostUsd?: number | null;
+  thinkingCostUsd?: number | null;
+  toolUseCostUsd?: number | null;
+  pricingSource?: string;
+  verifiedDate?: string;
+  formattedCost?: string;
+}
+
+export interface FunctionCallStats {
+  executed: number;
+  successful: number;
+  failed: number;
+  byTool?: Record<string, { executed: number; successful: number; failed: number }>;
+}
+
+export interface ImportAiUsageSummary {
+  importId: string;
+  correlationId?: string;
+  modelId: string;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  thoughtsTokens?: number;
+  toolUsePromptTokens?: number;
+  cachedContentTokens?: number;
+  estimatedCost: EstimatedCostSummary;
+  totalLatencyMs: number;
+  avgLatencyMs: number;
+  maxLatencyMs: number;
+  geminiRequestCount: number;
+  successfulRequestCount: number;
+  failedRequestCount: number;
+  missingMetadataRequestCount: number;
+  functionCalls: FunctionCallStats;
+  updatedAt: string;
+}
+
 export type PendingImportStatus = 'PENDING' | 'APPROVED' | 'COMMITTED' | 'REJECTED' | 'EXPIRED';
 
 export interface PendingImportDTO {
@@ -63,6 +107,7 @@ export interface PendingImportDTO {
   createdAt: string;
   expiresAt: string;
   committedImportId?: string | null;
+  aiUsage?: ImportAiUsageSummary | null;
   records: CRMRecord[];
   skipped: SkippedRow[];
   failed: FailedRow[];
@@ -74,6 +119,7 @@ export interface ApproveResponse {
   totalImported: number;
   totalSkipped?: number;
   totalFailed?: number;
+  aiUsage?: ImportAiUsageSummary | null;
   message?: string;
 }
 
@@ -110,6 +156,7 @@ export interface ImportResult {
   totalFailed?: number;
   importId?: string;
   pendingImportId?: string;
+  aiUsage?: ImportAiUsageSummary | null;
 }
 
 export type Step = 'upload' | 'preview' | 'confirm' | 'review' | 'results';

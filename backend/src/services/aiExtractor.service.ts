@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { performance } from 'perf_hooks';
 import {
   type BatchResult,
   type CRMRecord,
@@ -10,6 +11,7 @@ import { validateAIBatch } from './zodSchemas.service';
 import { shouldSkipRow } from './validators.service';
 import { sanitizeLogMessage } from '../lib/sanitizer';
 import type { ValidatedMappingPlan } from './geminiToolOrchestrator.service';
+import type { ImportUsageTracker } from './importUsageTracker';
 
 const SYSTEM_PROMPT = `You are a data-mapping engine for a CRM system called GrowEasy. Your ONLY job is to receive raw CSV row objects with arbitrary, inconsistent, or messy column names and map each row's data onto a fixed CRM schema.
 
@@ -181,9 +183,11 @@ function parseAIResponseText(rawText: string): unknown {
  */
 export async function extractBatch(
   rawRows: RawRow[],
-  mappingPlan?: ValidatedMappingPlan | null
+  mappingPlan?: ValidatedMappingPlan | null,
+  usageTracker?: ImportUsageTracker | null
 ): Promise<BatchResult> {
   const m = getModel();
+  const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
   let mappingInstructions = '';
   if (mappingPlan && mappingPlan.mappings.length > 0) {
@@ -201,7 +205,29 @@ export async function extractBatch(
 
   const prompt = `Here are ${rawRows.length} CSV rows to map onto the CRM schema. Return a JSON array with exactly ${rawRows.length} objects.${mappingInstructions}\n\nInput:\n${JSON.stringify(rawRows, null, 2)}`;
 
-  const result = await m.generateContent(prompt);
+  const startTime = performance.now();
+  let result: any;
+  try {
+    result = await m.generateContent(prompt);
+    const latencyMs = performance.now() - startTime;
+    usageTracker?.recordGeminiResponse({
+      callType: 'batch_extraction',
+      modelId: modelName,
+      latencyMs,
+      response: result?.response,
+    });
+  } catch (err) {
+    const latencyMs = performance.now() - startTime;
+    usageTracker?.recordGeminiResponse({
+      callType: 'batch_extraction',
+      modelId: modelName,
+      latencyMs,
+      error: err,
+      status: 'failed',
+    });
+    throw err;
+  }
+
   const responseText = result.response.text();
 
   // Parse: may throw for retry-eligible structural errors

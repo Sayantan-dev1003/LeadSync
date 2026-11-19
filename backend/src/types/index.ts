@@ -1,5 +1,9 @@
 // Shared TypeScript types for the GrowEasy CSV Importer
 
+import type { ImportAiUsageSummary } from './observability';
+
+export * from './observability';
+
 export type RawRow = Record<string, string>;
 
 export const CRM_STATUS_VALUES = [
@@ -90,6 +94,7 @@ export interface PendingImportDTO {
   createdAt: string;
   expiresAt: string;
   committedImportId?: string | null;
+  aiUsage?: ImportAiUsageSummary | null;
   records: CRMRecord[];
   skipped: SkippedRow[];
   failed: FailedRow[];
@@ -129,6 +134,7 @@ export interface SSECompleteEvent {
   totalFailed: number;
   totalImported?: number;
   importId?: string;
+  aiUsage?: ImportAiUsageSummary | null;
 }
 
 export interface SSEErrorEvent {

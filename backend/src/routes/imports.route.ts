@@ -9,6 +9,7 @@ import {
 } from '../middleware/auth.middleware';
 import { sanitizeLogMessage } from '../lib/sanitizer';
 import { cleanupExpiredPendingImports } from '../services/retention.service';
+import { auditLogger } from '../services/auditLogger.service';
 import type { CRMRecord, SkippedRow, FailedRow } from '../types';
 
 const router = Router();
@@ -86,6 +87,7 @@ router.get('/pending/:pendingImportId', requireAuth, async (req: Request, res: R
         createdAt: pending.createdAt,
         expiresAt: pending.expiresAt,
         committedImportId: pending.committedImportId,
+        aiUsage: (pending as any).aiUsage || null,
         records,
         skipped,
         failed,
@@ -113,11 +115,32 @@ router.get('/pending/:pendingImportId', requireAuth, async (req: Request, res: R
  */
 router.post('/:pendingImportId/approve', requireAuth, async (req: Request, res: Response): Promise<void> => {
   const { pendingImportId } = req.params;
+  const startTime = Date.now();
+  const correlationId = (req.headers['x-correlation-id'] ||
+    req.headers['x-request-id'] ||
+    `corr_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`) as string;
 
   if (!isValidId(pendingImportId)) {
+    auditLogger.logApprovalEvent({
+      event: 'import_approval_failed',
+      importId: pendingImportId || 'invalid',
+      correlationId,
+      status: 'failed',
+      errorCode: 'INVALID_ID',
+      errorMessage: 'Invalid pending import ID',
+      userId: req.user?.id,
+    });
     res.status(400).json({ error: 'Invalid pending import ID' });
     return;
   }
+
+  auditLogger.logApprovalEvent({
+    event: 'import_approval_started',
+    importId: pendingImportId,
+    correlationId,
+    status: 'started',
+    userId: req.user?.id,
+  });
 
   try {
     // 1. Initial read and validation checks
@@ -261,6 +284,7 @@ router.post('/:pendingImportId/approve', requireAuth, async (req: Request, res: 
             totalRows: initialPending.totalRows,
             totalImported: revalidatedRecords.length,
             totalSkipped: skipped.length + failed.length,
+            aiUsage: (initialPending as any).aiUsage || undefined,
             leads: {
               create: revalidatedRecords.map((r) => ({
                 createdAt: (() => {
@@ -321,30 +345,83 @@ router.post('/:pendingImportId/approve', requireAuth, async (req: Request, res: 
       }
     );
 
+    auditLogger.logApprovalEvent({
+      event: 'import_approval_succeeded',
+      importId: pendingImportId,
+      correlationId,
+      status: 'success',
+      outcome: result.alreadyCommitted ? 'ALREADY_COMMITTED' : 'COMMITTED',
+      durationMs: Date.now() - startTime,
+      totalImported: result.totalImported,
+      userId: req.user?.id,
+    });
+
     res.json({
       success: true,
       importId: result.importId,
       totalImported: result.totalImported,
       totalSkipped: skipped.length,
       totalFailed: failed.length,
+      aiUsage: (initialPending as any).aiUsage || null,
       message: result.alreadyCommitted ? 'Import already approved and committed' : undefined,
     });
   } catch (err: unknown) {
+    const durationMs = Date.now() - startTime;
     if (err instanceof Error) {
       if (err.message === 'CONCURRENT_CONFLICT') {
+        auditLogger.logApprovalEvent({
+          event: 'import_approval_failed',
+          importId: pendingImportId,
+          correlationId,
+          status: 'failed',
+          durationMs,
+          errorCode: 'CONCURRENT_CONFLICT',
+          errorMessage: 'Import is currently being processed by another request',
+          userId: req.user?.id,
+        });
         res.status(409).json({ error: 'Import is currently being processed by another request' });
         return;
       }
       if (err.message === 'REJECTED_CONFLICT') {
+        auditLogger.logApprovalEvent({
+          event: 'import_approval_failed',
+          importId: pendingImportId,
+          correlationId,
+          status: 'failed',
+          durationMs,
+          errorCode: 'REJECTED_CONFLICT',
+          errorMessage: 'This pending import was rejected and cannot be approved',
+          userId: req.user?.id,
+        });
         res.status(400).json({ error: 'This pending import was rejected and cannot be approved' });
         return;
       }
       if (err.message === 'EXPIRED_CONFLICT') {
+        auditLogger.logApprovalEvent({
+          event: 'import_approval_failed',
+          importId: pendingImportId,
+          correlationId,
+          status: 'failed',
+          durationMs,
+          errorCode: 'EXPIRED_CONFLICT',
+          errorMessage: 'This pending import has expired and cannot be approved',
+          userId: req.user?.id,
+        });
         res.status(400).json({ error: 'This pending import has expired and cannot be approved' });
         return;
       }
     }
     const safeError = sanitizeLogMessage(err instanceof Error ? err.message.split('\n')[0] : 'Database error');
+    auditLogger.logApprovalEvent({
+      event: 'import_approval_failed',
+      importId: pendingImportId,
+      correlationId,
+      status: 'failed',
+      durationMs,
+      errorCode: 'DATABASE_ERROR',
+      errorMessage: safeError,
+      userId: req.user?.id,
+    });
     console.error(`Approval failed for pending import ${pendingImportId}: ${safeError}`);
     res.status(500).json({ error: 'Failed to commit approved import to database' });
   }
@@ -361,11 +438,32 @@ router.post('/:pendingImportId/approve', requireAuth, async (req: Request, res: 
  */
 router.post('/:pendingImportId/reject', requireAuth, async (req: Request, res: Response): Promise<void> => {
   const { pendingImportId } = req.params;
+  const startTime = Date.now();
+  const correlationId = (req.headers['x-correlation-id'] ||
+    req.headers['x-request-id'] ||
+    `corr_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`) as string;
 
   if (!isValidId(pendingImportId)) {
+    auditLogger.logRejectionEvent({
+      event: 'import_rejection_failed',
+      importId: pendingImportId || 'invalid',
+      correlationId,
+      status: 'failed',
+      errorCode: 'INVALID_ID',
+      errorMessage: 'Invalid pending import ID',
+      userId: req.user?.id,
+    });
     res.status(400).json({ error: 'Invalid pending import ID' });
     return;
   }
+
+  auditLogger.logRejectionEvent({
+    event: 'import_rejection_started',
+    importId: pendingImportId,
+    correlationId,
+    status: 'started',
+    userId: req.user?.id,
+  });
 
   try {
     const pending = await prisma.pendingImport.findUnique({
@@ -373,18 +471,47 @@ router.post('/:pendingImportId/reject', requireAuth, async (req: Request, res: R
     });
 
     if (!pending) {
+      auditLogger.logRejectionEvent({
+        event: 'import_rejection_failed',
+        importId: pendingImportId,
+        correlationId,
+        status: 'failed',
+        durationMs: Date.now() - startTime,
+        errorCode: 'NOT_FOUND',
+        errorMessage: 'Pending import not found',
+        userId: req.user?.id,
+      });
       res.status(404).json({ error: 'Pending import not found' });
       return;
     }
 
     // Authorization check
     if (req.user && !isAuthorizedForPendingImport(req.user, pending)) {
+      auditLogger.logRejectionEvent({
+        event: 'import_rejection_failed',
+        importId: pendingImportId,
+        correlationId,
+        status: 'failed',
+        durationMs: Date.now() - startTime,
+        errorCode: 'FORBIDDEN',
+        errorMessage: 'Unauthorized to reject this pending import',
+        userId: req.user?.id,
+      });
       res.status(403).json({ error: 'You are not authorized to reject this pending import' });
       return;
     }
 
     // Gracefully handle repeated rejection
     if (pending.status === 'REJECTED') {
+      auditLogger.logRejectionEvent({
+        event: 'import_rejection_succeeded',
+        importId: pendingImportId,
+        correlationId,
+        status: 'success',
+        outcome: 'ALREADY_REJECTED',
+        durationMs: Date.now() - startTime,
+        userId: req.user?.id,
+      });
       res.json({
         success: true,
         message: 'Pending import is already rejected',
@@ -394,6 +521,16 @@ router.post('/:pendingImportId/reject', requireAuth, async (req: Request, res: R
     }
 
     if (pending.status === 'APPROVED' || pending.status === 'COMMITTED') {
+      auditLogger.logRejectionEvent({
+        event: 'import_rejection_failed',
+        importId: pendingImportId,
+        correlationId,
+        status: 'failed',
+        durationMs: Date.now() - startTime,
+        errorCode: 'ALREADY_APPROVED',
+        errorMessage: 'Cannot reject an import that has already been approved or committed',
+        userId: req.user?.id,
+      });
       res.status(400).json({ error: 'Cannot reject an import that has already been approved or committed' });
       return;
     }
@@ -416,6 +553,15 @@ router.post('/:pendingImportId/reject', requireAuth, async (req: Request, res: R
       // Concurrently updated by another request
       const current = await prisma.pendingImport.findUnique({ where: { id: pendingImportId } });
       if (current?.status === 'REJECTED') {
+        auditLogger.logRejectionEvent({
+          event: 'import_rejection_succeeded',
+          importId: pendingImportId,
+          correlationId,
+          status: 'success',
+          outcome: 'ALREADY_REJECTED',
+          durationMs: Date.now() - startTime,
+          userId: req.user?.id,
+        });
         res.json({
           success: true,
           message: 'Pending import is already rejected',
@@ -424,12 +570,42 @@ router.post('/:pendingImportId/reject', requireAuth, async (req: Request, res: R
         return;
       }
       if (current?.status === 'APPROVED' || current?.status === 'COMMITTED') {
+        auditLogger.logRejectionEvent({
+          event: 'import_rejection_failed',
+          importId: pendingImportId,
+          correlationId,
+          status: 'failed',
+          durationMs: Date.now() - startTime,
+          errorCode: 'ALREADY_APPROVED',
+          errorMessage: 'Cannot reject an import that has already been approved',
+          userId: req.user?.id,
+        });
         res.status(400).json({ error: 'Cannot reject an import that has already been approved' });
         return;
       }
+      auditLogger.logRejectionEvent({
+        event: 'import_rejection_failed',
+        importId: pendingImportId,
+        correlationId,
+        status: 'failed',
+        durationMs: Date.now() - startTime,
+        errorCode: 'CONCURRENT_CONFLICT',
+        errorMessage: 'Import is currently being processed by another request',
+        userId: req.user?.id,
+      });
       res.status(409).json({ error: 'Import is currently being processed by another request' });
       return;
     }
+
+    auditLogger.logRejectionEvent({
+      event: 'import_rejection_succeeded',
+      importId: pendingImportId,
+      correlationId,
+      status: 'success',
+      outcome: 'REJECTED_AND_PURGED',
+      durationMs: Date.now() - startTime,
+      userId: req.user?.id,
+    });
 
     res.json({
       success: true,
@@ -437,7 +613,18 @@ router.post('/:pendingImportId/reject', requireAuth, async (req: Request, res: R
       status: 'REJECTED',
     });
   } catch (err) {
+    const durationMs = Date.now() - startTime;
     const safeError = sanitizeLogMessage(err instanceof Error ? err.message : 'Database error');
+    auditLogger.logRejectionEvent({
+      event: 'import_rejection_failed',
+      importId: pendingImportId,
+      correlationId,
+      status: 'failed',
+      durationMs,
+      errorCode: 'DATABASE_ERROR',
+      errorMessage: safeError,
+      userId: req.user?.id,
+    });
     console.error(`Failed to reject pending import ${pendingImportId}: ${safeError}`);
     res.status(500).json({ error: 'Failed to reject pending import' });
   }
@@ -473,6 +660,7 @@ router.get('/', requireAuth, async (_req: Request, res: Response): Promise<void>
         totalImported: true,
         totalSkipped: true,
         createdAt: true,
+        aiUsage: true,
       },
     });
     res.json({ imports });
@@ -503,6 +691,7 @@ router.get('/:id', requireAuth, async (req: Request, res: Response): Promise<voi
         totalImported: true,
         totalSkipped: true,
         createdAt: true,
+        aiUsage: true,
       },
     });
 

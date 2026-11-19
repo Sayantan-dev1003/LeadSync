@@ -22,6 +22,7 @@ export interface ExtractCompleteEvent {
   totalSkipped: number;
   totalFailed?: number;
   importId?: string;
+  aiUsage?: import('@/types').ImportAiUsageSummary | null;
 }
 
 export type { ApproveResponse, RejectResponse, PendingImportDTO };

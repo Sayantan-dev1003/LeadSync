@@ -2,8 +2,12 @@ import pLimit from 'p-limit';
 import { chunkArray } from './csvParser.service';
 import { extractBatch, withRetry } from './aiExtractor.service';
 import { planMappingsWithTools, type ValidatedMappingPlan } from './geminiToolOrchestrator.service';
+import { ImportUsageTracker } from './importUsageTracker';
 import type { CRMRecord, FailedRow, RawRow, SkippedRow, SSEEvent } from '../types';
+import type { ImportAiUsageSummary } from '../types/observability';
 import { sanitizeLogMessage } from '../lib/sanitizer';
+
+import type { AuthUser } from '../middleware/auth.middleware';
 
 export interface OrchestratorOptions {
   batchSize?: number;
@@ -13,6 +17,10 @@ export interface OrchestratorOptions {
   importId?: string;
   headers?: string[];
   skipToolMapping?: boolean;
+  correlationId?: string;
+  userId?: string;
+  user?: AuthUser;
+  usageTracker?: ImportUsageTracker;
 }
 
 export type SSECallback = (event: SSEEvent) => void;
@@ -24,7 +32,7 @@ export type SSECallback = (event: SSEEvent) => void;
  * 3. Processes batches concurrently with rate limiting and validated mapping context
  * 4. Retries failed batches with exponential backoff
  * 5. Streams progress events via callback
- * 6. Returns aggregated results
+ * 6. Returns aggregated results including AI token usage, costs, latency & function-calling metrics
  *
  * Failed rows (AI/validation errors) are tracked separately from skipped rows
  * (deliberate skip because no contact info). This distinction is preserved in
@@ -39,10 +47,23 @@ export async function orchestrateImport(
   skipped: SkippedRow[];
   failed: FailedRow[];
   mappingPlan?: ValidatedMappingPlan | null;
+  aiUsage?: ImportAiUsageSummary;
 }> {
   const batchSize = options.batchSize ?? parseInt(process.env.BATCH_SIZE || '20', 10);
   const concurrency = options.concurrency ?? parseInt(process.env.BATCH_CONCURRENCY || '3', 10);
   const maxRetries = options.maxRetries ?? parseInt(process.env.BATCH_MAX_RETRIES || '3', 10);
+
+  // Initialize per-import AI usage tracker to aggregate metrics across all orchestration steps
+  const effectiveImportId =
+    options.importId ||
+    options.correlationId ||
+    `imp_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  const tracker =
+    options.usageTracker ??
+    new ImportUsageTracker({
+      importId: effectiveImportId,
+      correlationId: options.correlationId,
+    });
 
   // ---------------------------------------------------------------------------
   // Stage A: Tool-orchestrated mapping planning (once per import)
@@ -52,7 +73,13 @@ export async function orchestrateImport(
 
   if (headers.length > 0 && !options.skipToolMapping) {
     try {
-      const { plan, fallbackOccurred } = await planMappingsWithTools(headers);
+      const { plan, fallbackOccurred } = await planMappingsWithTools(headers, {
+        correlationId: options.correlationId,
+        importId: effectiveImportId,
+        userId: options.userId,
+        user: options.user,
+        usageTracker: tracker,
+      });
       if (plan && !fallbackOccurred) {
         validatedMappingPlan = plan;
       }
@@ -85,7 +112,7 @@ export async function orchestrateImport(
 
         try {
           const result = await withRetry(
-            () => extractBatch(batch, validatedMappingPlan),
+            () => extractBatch(batch, validatedMappingPlan, tracker),
             maxRetries
           );
           batchRecords = result.records;
@@ -126,10 +153,13 @@ export async function orchestrateImport(
     allFailed.push(...batchFailed);
   });
 
+  const aiUsage = tracker.finalize();
+
   return {
     records: allRecords,
     skipped: allSkipped,
     failed: allFailed,
     mappingPlan: validatedMappingPlan,
+    aiUsage,
   };
 }

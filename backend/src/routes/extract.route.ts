@@ -123,7 +123,11 @@ router.post('/', requireAuth, upload.single('file'), async (req: Request, res: R
     }
 
     // 2. Run AI extraction with streaming progress
-    const { records, skipped, failed } = await orchestrateImport(
+    const correlationId = (req.headers['x-correlation-id'] ||
+      req.headers['x-request-id'] ||
+      `corr_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`) as string;
+
+    const { records, skipped, failed, aiUsage } = await orchestrateImport(
       rows,
       (event) => {
         if (!canWriteToStream()) return;
@@ -134,7 +138,7 @@ router.post('/', requireAuth, upload.single('file'), async (req: Request, res: R
         }
         sendEvent(event);
       },
-      { headers, filename }
+      { headers, filename, correlationId, userId: req.user?.id, user: req.user }
     );
 
     if (!canWriteToStream()) {
@@ -156,6 +160,7 @@ router.post('/', requireAuth, upload.single('file'), async (req: Request, res: R
           records: records as any,
           skipped: skipped as any,
           failed: failed as any,
+          aiUsage: aiUsage as any,
           expiresAt,
         },
       });
@@ -178,6 +183,7 @@ router.post('/', requireAuth, upload.single('file'), async (req: Request, res: R
       totalSkipped: skipped.length,
       totalFailed: failed.length,
       totalImported: 0,
+      aiUsage,
     });
   } catch (err: unknown) {
     const rawMessage = err instanceof Error ? err.message.split('\n')[0] : 'An unexpected error occurred';

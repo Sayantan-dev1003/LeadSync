@@ -535,13 +535,20 @@ docker-compose up --build -d
 
 ---
 
-## 🧪 Testing Suite
+## 🧪 Testing Suite & Reliability Evaluation
 
 ### Run Backend Tests
 ```bash
 cd backend
 npm test
-# 184 tests passing across 10 suites (tools, geminiFunctionCalling, toolIntegrationWorkflow, auth, zodSchemas, aiExtractor, approvalWorkflow, csvParser, validators, importOrchestrator)
+# 219 tests passing across 12 suites (10 core + agent-evaluation + guardrailsAndAuditLog)
+```
+
+### Run Agent Reliability Evaluation
+```bash
+cd backend
+npm run evaluate:agent        # Deterministic CI Mode (26 scenarios, zero API cost)
+npm run evaluate:agent:live   # Live Gemini Evaluation Mode (requires GEMINI_API_KEY)
 ```
 
 ### Run Frontend Tests
@@ -556,6 +563,149 @@ npm test
 cd backend && npm run build     # tsc compile check
 cd ../frontend && npm run build # Next.js webpack build
 ```
+
+---
+
+## 🔬 Agent Reliability Evaluation Framework
+
+LeadSync includes a dedicated, quantitative evaluation framework in `backend/src/evaluation/` designed to evaluate agentic workflows systematically rather than relying solely on standard unit tests.
+
+### Architecture
+
+```text
+scenarios.ts (26 Curated Scenarios)
+     │
+     ▼
+evaluator.ts ─── executes against ───► Gemini Tool Orchestrator / Backend Tools / Zod Validation
+     │
+     ▼
+evaluation-metrics.ts ─── computes ───► 4 Reliability Metrics + Formatted Summary
+     │
+     ▼
+runEvaluation.ts (CLI: evaluate:agent) / agent-evaluation.test.ts (Jest CI)
+```
+
+### Scenario Categories (26 Scenarios)
+
+1. **A. Function / Tool Selection Accuracy (`SCN-SEL-01`..`06`)**:
+   - Straightforward recognizable CRM headers.
+   - Inconsistent / unfamiliar column names (`Cust_Name`, `Mob_No`, `staus`).
+   - Reordered column layouts.
+   - Synonymous / alternative column names (`Lead (person)`, `Cell Phone`, `Organization`).
+   - Ambiguous headers requiring schema inspection (`Location`, `Incharge`).
+   - Unmappable tracking columns (`Cookie_ID`, `Internal_Tracking_Hash`).
+2. **B. Function Argument Accuracy (`SCN-ARG-01`..`06`)**:
+   - Correctly structured arguments matching schema.
+   - Missing mandatory arguments (`headers` missing).
+   - Incorrect argument types (string instead of array).
+   - Invalid CRM field targets (`telephoneNumber`).
+   - Unexpected additional parameters (strict schema rejection).
+   - Empty or malformed argument values (`min(1)` violation).
+3. **C. AI Output Validation (`SCN-VAL-01`..`06`)**:
+   - Valid structured AI extraction responses (full 17-field contract).
+   - Malformed JSON responses (truncated output handling).
+   - Missing mandatory contact fields (authoritative server skip override).
+   - Invalid email address formats.
+   - Invalid mobile numbers (<5 digits).
+   - Unexpected rogue fields in AI payloads.
+4. **D. Tool Execution and Recovery (`SCN-REC-01`..`08`)**:
+   - Successful function execution.
+   - Transient failure followed by backoff retry recovery.
+   - Permanent tool execution failure (safe fallback).
+   - Bounded tool execution timeout.
+   - Unknown function name allowlist rejection.
+   - Maximum orchestration rounds and tool-call limits.
+   - Unauthorized execution and cross-tenant ownership mismatches.
+   - Human approval boundary preservation (zero CRM writes before `/approve`).
+
+### Reliability Metrics & Formulas
+
+- **Metric 1: Successful Extraction Rate**:
+  $$\text{Successful Extraction Rate} = \left(\frac{\text{Successfully Extracted Expected Cases}}{\text{Total Eligible Evaluation Cases}}\right) \times 100$$
+  *Reports full CSV success rate and individual row extraction rate.*
+- **Metric 2: Function-Call Accuracy**:
+  - Function Selection Accuracy: Percentage of correct tool selections across scenarios.
+  - Function Argument Accuracy: Correct argument fields / total evaluated argument fields.
+- **Metric 3: Schema Validation Pass Rate**:
+  $$\text{Pass Rate} = \left(\frac{\text{Valid Accepted} + \text{Invalid Rejected}}{\text{Total Validation Test Cases}}\right) \times 100$$
+- **Metric 4: Failure Recovery Rate**:
+  $$\text{Recovery Rate} = \left(\frac{\text{Successfully Recovered Transient Failures}}{\text{Total Eligible Transient Scenarios}}\right) \times 100$$
+
+### Example Output Report
+
+```text
+================================================================================
+                         AGENT RELIABILITY EVALUATION                           
+================================================================================
+
+Mode: DETERMINISTIC (Duration: 117ms)
+Total scenarios: 26
+Passed: 26
+Failed: 0
+
+Metrics:
+- Successful Extraction Rate: 100% (CSV: 100%, Individual Rows: 66.7%)
+- Function Selection Accuracy: 100%
+- Function Argument Accuracy: 100%
+- Schema Validation Pass Rate: 100%
+- Failure Recovery Rate: 100%
+
+Failed Scenarios:
+- (None - All evaluation scenarios passed)
+================================================================================
+```
+
+---
+
+## 🛡️ Gemini Function-Calling Security Guardrails
+
+The function-calling implementation enforces multi-layered server-side guardrails in `backend/src/services/tools/toolRegistry.ts`:
+
+1. **Tool Allowlisting**:
+   - Centralized allowlist (`ALLOWED_TOOL_NAMES = ['get_crm_schema', 'retrieve_mapping_examples', 'validate_mapping']`).
+   - Dynamic evaluation (`eval`, `new Function`, dynamic imports) is strictly prohibited. Unknown tools fail immediately with `UNKNOWN_TOOL` / `ALLOWLIST_REJECTION`.
+2. **Strict Zod Argument Validation**:
+   - All tool arguments are validated with strict Zod schemas (`.strict()`).
+   - Missing required keys, type mismatches, malformed inputs, and injected rogue properties fail immediately with `INVALID_TOOL_ARGUMENTS`.
+3. **Server-Side Authorization**:
+   - Authenticated session verification (`user.role === 'owner'`).
+   - Import ownership validation: prevents User A from accessing User B's staged import (`UNAUTHORIZED_TOOL_EXECUTION`).
+4. **Execution Limits & Bounded Orchestration**:
+   - Configurable limits: `DEFAULT_MAX_TOOL_CALLS = 5`, `DEFAULT_MAX_ROUNDS = 3`.
+   - Tool calls exceeding limits are halted with `TOOL_CALL_LIMIT_EXCEEDED` and audit-logged.
+5. **Timeout & Bounded Retry**:
+   - Bounded execution timeout (`timeoutMs: 10000`) via `Promise.race()`.
+   - Bounded exponential backoff retry for transient failures (`maxRetries: 2`). Non-transient errors fail fast without retry.
+6. **Mandatory Human Approval Boundary**:
+   - All tools in the registry are strictly read-only discovery tools.
+   - Lead extraction persists strictly into database staging (`pending_imports`).
+   - Production CRM tables (`imports`, `leads`) are **never** mutated by AI tool execution. Mutation requires explicit human review and atomic commit via `POST /api/imports/:id/approve`.
+
+---
+
+## 📋 Structured Audit Logging
+
+LeadSync implements structured observability via `backend/src/services/auditLogger.service.ts`:
+
+### Event Types
+- `tool_execution_started`: Emitted before executing a registered backend tool.
+- `tool_execution_succeeded`: Emitted upon successful tool execution with execution duration.
+- `tool_execution_failed`: Emitted on any tool failure with error code, category, and sanitized message.
+- `import_approval_started`, `import_approval_succeeded`, `import_approval_failed`: Emitted during human approval lifecycle.
+- `import_rejection_started`, `import_rejection_succeeded`, `import_rejection_failed`: Emitted during human rejection lifecycle.
+
+### Metadata & Correlation
+- `correlationId`: Propagated from HTTP request headers or generated to tie together the entire lifecycle: Tool Execution ➔ Extraction ➔ Staging ➔ Approval / Rejection.
+- `importId`: Pending import identifier.
+- `durationMs`: High-resolution execution duration in milliseconds.
+- `retryCount`: Count of retries performed for transient errors.
+- `orchestrationRound`: Current round of multi-turn tool exchange.
+
+### Mandatory PII & Secret Redaction
+- Redacts customer PII: email addresses (`[REDACTED_EMAIL]`) and phone numbers (`[REDACTED_PHONE]`).
+- Redacts security credentials: Google Gemini API keys (`[REDACTED_GEMINI_KEY]`), Bearer authorization tokens (`Bearer [REDACTED_TOKEN]`), and passwords/secrets.
+- Deep sanitization (`redactDeep`) sanitizes metadata keys and nested properties.
+- **Fail-safe**: Logger failures never throw or crash business logic. Log output is written to standard output (`console.info`) and error streams (`console.error`) as clean JSON lines.
 
 ---
 

@@ -26,6 +26,7 @@ model Import {
   totalImported Int
   totalSkipped  Int
   createdAt     DateTime       @default(now())
+  aiUsage       Json?
   leads         Lead[]
   skippedRows   SkippedRow[]
   pendingImport PendingImport?
@@ -80,6 +81,7 @@ model PendingImport {
   records           Json
   skipped           Json
   failed            Json
+  aiUsage           Json?
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt
   expiresAt         DateTime

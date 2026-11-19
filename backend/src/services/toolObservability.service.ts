@@ -81,10 +81,11 @@ export class ToolObservabilityTracker {
 
   recordTokenUsage(usage?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number }): void {
     if (!usage) return;
+    const current = this.metrics.tokenUsage || { promptTokens: 0, candidatesTokens: 0, totalTokens: 0 };
     this.metrics.tokenUsage = {
-      promptTokens: usage.promptTokenCount,
-      candidatesTokens: usage.candidatesTokenCount,
-      totalTokens: usage.totalTokenCount,
+      promptTokens: (current.promptTokens || 0) + (usage.promptTokenCount || 0),
+      candidatesTokens: (current.candidatesTokens || 0) + (usage.candidatesTokenCount || 0),
+      totalTokens: (current.totalTokens || 0) + (usage.totalTokenCount || ((usage.promptTokenCount || 0) + (usage.candidatesTokenCount || 0))),
     };
   }
 

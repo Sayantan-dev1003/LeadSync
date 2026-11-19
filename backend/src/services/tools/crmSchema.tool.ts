@@ -1,5 +1,9 @@
 import { FunctionDeclaration, SchemaType } from '@google/generative-ai';
+import { z } from 'zod';
 import { CRM_FIELDS, CRM_STATUS_VALUES, DATA_SOURCE_VALUES } from '../../types';
+
+export const GetCrmSchemaArgsSchema = z.object({}).strict().optional();
+export type GetCrmSchemaArgs = z.infer<typeof GetCrmSchemaArgsSchema>;
 
 export interface CRMFieldDefinition {
   name: string;

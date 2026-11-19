@@ -3,6 +3,7 @@ import {
   FunctionCallingMode,
   Part,
 } from '@google/generative-ai';
+import { performance } from 'perf_hooks';
 import { z } from 'zod';
 import {
   executeBackendTool,
@@ -11,7 +12,10 @@ import {
 } from './tools/toolRegistry';
 import { validateMapping } from './tools/validateMapping.tool';
 import { ToolObservabilityTracker, MappingPlanMetrics } from './toolObservability.service';
+import { ImportUsageTracker } from './importUsageTracker';
 import { sanitizeLogMessage } from '../lib/sanitizer';
+import { auditLogger } from './auditLogger.service';
+import type { AuthUser } from '../middleware/auth.middleware';
 
 export interface ColumnMapping {
   source: string;
@@ -31,7 +35,14 @@ export interface ToolOrchestratorOptions {
   maxRounds?: number;
   maxToolCalls?: number;
   timeoutMs?: number;
+  toolTimeoutMs?: number;
   temperature?: number;
+  userId?: string;
+  user?: AuthUser;
+  importId?: string;
+  correlationId?: string;
+  pendingImportOwnerId?: string;
+  usageTracker?: ImportUsageTracker;
 }
 
 const DEFAULT_MAX_ROUNDS = 3;
@@ -184,7 +195,28 @@ Please determine the optimal mapping onto the LeadSync CRM target schema. Use th
     let mappings: ColumnMapping[] | null = null;
 
     tracker.recordModelRequest();
-    let currentResult = await chat.sendMessage(userPrompt, { signal: abortController.signal });
+    const t0 = performance.now();
+    let currentResult: any;
+    try {
+      currentResult = await chat.sendMessage(userPrompt, { signal: abortController.signal });
+      const latencyMs = performance.now() - t0;
+      options.usageTracker?.recordGeminiResponse({
+        callType: 'mapping_plan_initial',
+        modelId: modelName,
+        latencyMs,
+        response: currentResult.response,
+      });
+    } catch (err) {
+      const latencyMs = performance.now() - t0;
+      options.usageTracker?.recordGeminiResponse({
+        callType: 'mapping_plan_initial',
+        modelId: modelName,
+        latencyMs,
+        error: err,
+        status: 'failed',
+      });
+      throw err;
+    }
 
     for (let round = 1; round <= maxRounds; round++) {
       tracker.recordRound();
@@ -208,6 +240,20 @@ Please determine the optimal mapping onto the LeadSync CRM target schema. Use th
       for (const call of functionCalls) {
         if (totalToolCalls >= maxToolCalls) {
           console.warn(`[GeminiToolOrchestrator] Max tool calls limit (${maxToolCalls}) reached.`);
+          auditLogger.logToolExecutionFailed({
+            toolName: call.name,
+            importId: options.importId,
+            correlationId: options.correlationId,
+            orchestrationRound: round,
+            errorCode: 'TOOL_CALL_LIMIT_EXCEEDED',
+            errorCategory: 'EXECUTION_LIMIT_EXHAUSTED',
+            errorMessage: `Tool call limit of ${maxToolCalls} exceeded.`,
+            executionLimitStatus: {
+              totalCalls: totalToolCalls,
+              maxCalls: maxToolCalls,
+              remaining: 0,
+            },
+          });
           functionResponses.push({
             functionResponse: {
               name: call.name,
@@ -221,12 +267,26 @@ Please determine the optimal mapping onto the LeadSync CRM target schema. Use th
         executed.push(call.name);
 
         const callStartTime = Date.now();
-        const execResult = await executeBackendTool(call.name, call.args, {
-          availableHeaders: sourceHeaders,
-        });
+        const execResult = await executeBackendTool(
+          call.name,
+          call.args,
+          {
+            availableHeaders: sourceHeaders,
+            userId: options.userId,
+            user: options.user,
+            importId: options.importId,
+            correlationId: options.correlationId,
+            pendingImportOwnerId: options.pendingImportOwnerId,
+            orchestrationRound: round,
+          },
+          {
+            timeoutMs: options.toolTimeoutMs,
+          }
+        );
         const durationMs = Date.now() - callStartTime;
 
         tracker.recordToolCall(call.name, execResult.success, durationMs, execResult.error);
+        options.usageTracker?.recordToolExecution(call.name, execResult.success);
 
         functionResponses.push({
           functionResponse: {
@@ -240,7 +300,27 @@ Please determine the optimal mapping onto the LeadSync CRM target schema. Use th
 
       // Send function responses back to the model for the next turn
       tracker.recordModelRequest();
-      currentResult = await chat.sendMessage(functionResponses, { signal: abortController.signal });
+      const tRound = performance.now();
+      try {
+        currentResult = await chat.sendMessage(functionResponses, { signal: abortController.signal });
+        const latencyMs = performance.now() - tRound;
+        options.usageTracker?.recordGeminiResponse({
+          callType: 'mapping_plan_function_response',
+          modelId: modelName,
+          latencyMs,
+          response: currentResult.response,
+        });
+      } catch (err) {
+        const latencyMs = performance.now() - tRound;
+        options.usageTracker?.recordGeminiResponse({
+          callType: 'mapping_plan_function_response',
+          modelId: modelName,
+          latencyMs,
+          error: err,
+          status: 'failed',
+        });
+        throw err;
+      }
 
       // If this was the last allowed round, attempt to parse the final response
       if (round === maxRounds) {

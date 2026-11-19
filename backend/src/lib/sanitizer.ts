@@ -5,13 +5,19 @@
  */
 
 const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+// Match Gemini/Google API keys BEFORE phone regex so their numeric digits
+// are not partially consumed by the phone pattern first.
+// Real Google API keys are "AIza" followed by 35 alphanumeric/-/_ chars,
+// but we accept 30+ to handle edge cases and test keys of slightly different lengths.
+const GEMINI_KEY_REGEX = /AIza[0-9A-Za-z\-_]{30,}/g;
 const PHONE_REGEX = /(\+\d{1,4}[\s\-]?)?\(?\d{2,4}\)?[\s\-]?\d{3,4}[\s\-]?\d{3,5}/g;
 const BEARER_REGEX = /Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi;
-const GEMINI_KEY_REGEX = /AIza[0-9A-Za-z-_]{35}/g;
-const GENERIC_KEY_REGEX = /(?:api[_-]?key|secret|password|token)\s*[:=]\s*['"]?[A-Za-z0-9\-._~+/]+['"]?/gi;
+const GENERIC_KEY_REGEX = /(?:api[_-]?key|secret|password|token)\s*[:=]\s*['"']?[A-Za-z0-9\-._~+/]+['"']?/gi;
 
 /**
  * Sanitizes a message by replacing sensitive PII and secrets with safe placeholders.
+ * Ordering is intentional: Gemini keys are redacted before phone numbers so that
+ * the numeric portion of an API key is not mistakenly matched as a phone number first.
  */
 export function sanitizeLogMessage(message: unknown): string {
   if (message == null) return '';
@@ -19,10 +25,10 @@ export function sanitizeLogMessage(message: unknown): string {
 
   return text
     .replace(EMAIL_REGEX, '[REDACTED_EMAIL]')
+    .replace(GEMINI_KEY_REGEX, '[REDACTED_GEMINI_KEY]')
     .replace(PHONE_REGEX, '[REDACTED_PHONE]')
     .replace(BEARER_REGEX, 'Bearer [REDACTED_TOKEN]')
-    .replace(GEMINI_KEY_REGEX, '[REDACTED_GEMINI_KEY]')
-    .replace(GENERIC_KEY_REGEX, '$1: [REDACTED_SECRET]');
+    .replace(GENERIC_KEY_REGEX, '[REDACTED_SECRET]');
 }
 
 /**

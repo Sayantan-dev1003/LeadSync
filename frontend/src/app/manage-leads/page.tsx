@@ -6,6 +6,8 @@ import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { Search, RefreshCw, Inbox, Lock } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
+import { AIUsageSummaryCard } from '@/components/AIUsageSummaryCard';
+import type { ImportAiUsageSummary } from '@/types';
 
 const BACKEND_URL =
   typeof window !== 'undefined'
@@ -28,6 +30,7 @@ interface ImportJob {
   id: string;
   totalImported: number;
   totalSkipped: number;
+  aiUsage?: ImportAiUsageSummary | null;
 }
 
 interface SkippedRow {
@@ -161,7 +164,15 @@ function ManageLeadsContent() {
       </div>
 
       {isAuthenticated && importId && importJob && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6">
+        <div className="space-y-4 mb-6">
+          {importJob.aiUsage && (
+            <AIUsageSummaryCard
+              usage={importJob.aiUsage}
+              title="Import AI Token Usage & Cost Observability"
+            />
+          )}
+
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
           <div 
             onClick={() => setActiveTab('parsed')}
             className={`p-4 rounded-xl border cursor-pointer transition-colors ${activeTab === 'parsed' ? 'border-brand-500 bg-brand-50 dark:bg-brand-500/10' : 'border-slate-200 dark:border-white/10 hover:border-brand-300 dark:bg-surface-800 bg-white'}`}
@@ -188,6 +199,7 @@ function ManageLeadsContent() {
             <div className="text-xl sm:text-2xl font-bold dark:text-white text-slate-900 mt-1">{importJob.totalSkipped}</div>
           </div>
         </div>
+      </div>
       )}
 
       <div className="bg-white dark:bg-surface-800 rounded-xl border dark:border-white/10 border-slate-200 overflow-hidden shadow-sm">

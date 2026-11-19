@@ -5,13 +5,13 @@ import { CRM_FIELDS, CRMField } from '../../types';
 export const SingleFieldMappingSchema = z.object({
   source: z.string().min(1).max(200),
   target: z.string().min(1).max(100),
-});
+}).strict();
 
 export type SingleFieldMapping = z.infer<typeof SingleFieldMappingSchema>;
 
 export const ValidateMappingArgsSchema = z.object({
   mappings: z.array(SingleFieldMappingSchema).min(1).max(50),
-});
+}).strict();
 
 export type ValidateMappingArgs = z.infer<typeof ValidateMappingArgsSchema>;
 

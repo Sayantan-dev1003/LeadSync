@@ -4,7 +4,7 @@ import { CRMField, CRM_FIELDS } from '../../types';
 
 export const RetrieveMappingExamplesArgsSchema = z.object({
   headers: z.array(z.string().min(1).max(200)).min(1).max(50),
-});
+}).strict();
 
 export type RetrieveMappingExamplesArgs = z.infer<typeof RetrieveMappingExamplesArgsSchema>;
 

@@ -22,8 +22,9 @@ import {
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { format } from 'date-fns';
-import type { CRMRecord, SkippedRow, FailedRow, CrmStatus } from '@/types';
+import type { CRMRecord, SkippedRow, FailedRow, CrmStatus, ImportAiUsageSummary } from '@/types';
 import { CRM_STATUS_LABELS, CRM_STATUS_COLORS } from '@/types';
+import { AIUsageSummaryCard } from '@/components/AIUsageSummaryCard';
 
 interface ReviewStepProps {
   pendingImportId: string;
@@ -32,6 +33,7 @@ interface ReviewStepProps {
   records: CRMRecord[];
   skipped: SkippedRow[];
   failed: FailedRow[];
+  aiUsage?: ImportAiUsageSummary | null;
   isApproving: boolean;
   isRejecting: boolean;
   approvalError: string | null;
@@ -76,6 +78,7 @@ export function ReviewStep({
   records,
   skipped,
   failed,
+  aiUsage,
   isApproving: _isApproving,
   isRejecting: _isRejecting,
   approvalError,
@@ -214,6 +217,9 @@ export function ReviewStep({
           </div>
         </div>
       )}
+
+      {/* AI Usage Observability Summary */}
+      {aiUsage && <AIUsageSummaryCard usage={aiUsage} />}
 
       {/* Summary Stat Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

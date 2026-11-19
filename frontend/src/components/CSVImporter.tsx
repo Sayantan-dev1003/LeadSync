@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { UploadStep } from '@/components/steps/UploadStep';
 import { PreviewStep } from '@/components/steps/PreviewStep';
 import { ReviewStep } from '@/components/steps/ReviewStep';
-import type { ParsedCSV, Step, CRMRecord, SkippedRow, FailedRow } from '@/types';
+import type { ParsedCSV, Step, CRMRecord, SkippedRow, FailedRow, ImportAiUsageSummary } from '@/types';
 import { X, Loader2, Sparkles, Check, Ban, AlertCircle, Lock } from 'lucide-react';
 import { extractLeads, approvePendingImport, rejectPendingImport } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
@@ -30,6 +30,7 @@ export function CSVImporter() {
   const [extractedRecords, setExtractedRecords] = useState<CRMRecord[]>([]);
   const [extractedSkipped, setExtractedSkipped] = useState<SkippedRow[]>([]);
   const [extractedFailed, setExtractedFailed] = useState<FailedRow[]>([]);
+  const [aiUsage, setAiUsage] = useState<ImportAiUsageSummary | null>(null);
 
   // Approval / Rejection states
   const [isApproving, setIsApproving] = useState(false);
@@ -47,6 +48,7 @@ export function CSVImporter() {
     setExtractedRecords([]);
     setExtractedSkipped([]);
     setExtractedFailed([]);
+    setAiUsage(null);
     setIsApproving(false);
     setIsRejecting(false);
     setApprovalError(null);
@@ -103,6 +105,9 @@ export function CSVImporter() {
           setExtractedRecords([...recordsAccumulator]);
           setExtractedSkipped([...skippedAccumulator]);
           setExtractedFailed([...failedAccumulator]);
+          if (event.aiUsage) {
+            setAiUsage(event.aiUsage);
+          }
           setIsExtracting(false);
           setStep('review');
         } else if (event.type === 'error') {
@@ -302,6 +307,7 @@ export function CSVImporter() {
                       records={extractedRecords}
                       skipped={extractedSkipped}
                       failed={extractedFailed}
+                      aiUsage={aiUsage}
                       isApproving={isApproving}
                       isRejecting={isRejecting}
                       approvalError={approvalError}
